@@ -1,3 +1,5 @@
+#![allow(unused)]
+use std::io::SeekFrom;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 use async_trait::async_trait;
@@ -12,6 +14,7 @@ use rdkafka::{
 };
 use redis::AsyncCommands;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tracing::{error, info, trace, warn};
 use tracing_subscriber;
@@ -132,6 +135,7 @@ trait File {
     async fn read(&mut self, size: usize) -> Result<Vec<u8>, Errors>;
     async fn write(&mut self, data: &str) -> Result<usize, Errors>;
     async fn fsync(&mut self) -> Result<(), Errors>;
+    async fn read_last_n_entries(&mut self, n: usize) -> Result<Vec<String>, Errors>;
 }
 
 struct RealFile {
@@ -168,6 +172,53 @@ impl File for RealFile {
             .await
             .map_err(|_| Errors::FileSyncError)
     }
+
+    async fn read_last_n_entries(&mut self, n: usize) -> Result<Vec<String>, Errors> {
+        let file = self.file.as_mut().ok_or(Errors::FileReadError)?;
+
+        // Get file size and seek to end
+        let file_size = file
+            .metadata()
+            .await
+            .map_err(|_| Errors::FileReadError)?
+            .len() as usize;
+        file.seek(SeekFrom::End(0))
+            .await
+            .map_err(|_| Errors::FileReadError)?;
+
+        // Read chunks from end until we find n newlines
+        let mut buffer = Vec::new();
+        let mut position = file_size;
+        let chunk_size = 1024; // Read 1KB at a time
+
+        while position > 0 && buffer.iter().filter(|&&c| c == b'\n').count() <= n {
+            let read_size = std::cmp::min(position, chunk_size);
+            position = position.saturating_sub(read_size);
+
+            file.seek(SeekFrom::Start(position as u64))
+                .await
+                .map_err(|_| Errors::FileReadError)?;
+
+            let mut chunk = vec![0; read_size];
+            file.read_exact(&mut chunk)
+                .await
+                .map_err(|_| Errors::FileReadError)?;
+
+            buffer.splice(0..0, chunk);
+        }
+
+        // Convert to string and get last n lines
+        let result = String::from_utf8_lossy(&buffer)
+            .lines()
+            .rev()
+            .take(n)
+            .map(String::from)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
+        Ok(result)
+    }
 }
 
 struct SimulatedFile {
@@ -177,6 +228,8 @@ struct SimulatedFile {
     current_file_size: usize,
     max_file_size: usize,
     inner: RealFile,
+    read_position: usize,
+    write_position: usize,
     fault_probabilities: HashMap<FileFaultType, f64>,
 }
 
@@ -195,6 +248,8 @@ impl SimulatedFile {
             current_file_size: 0,
             max_file_size: 0,
             inner: io,
+            read_position: 0,
+            write_position: 0,
             fault_probabilities,
         }
     }
@@ -215,9 +270,9 @@ impl File for SimulatedFile {
             warn!("Injecting fault while reading from file");
             return Err(Errors::FileReadError);
         }
-        let buffer = vec![0; size];
         assert!(size < self.file_contents.len());
-        self.file_contents[..size].clone_from_slice(&buffer);
+        let buffer = self.file_contents[self.read_position..self.read_position + size].to_vec();
+        self.read_position += size;
         Ok(buffer)
     }
 
@@ -227,19 +282,33 @@ impl File for SimulatedFile {
             return Err(Errors::FileWriteError);
         }
         let data = data.as_bytes();
-        let data_size = data.len();
-        if self.current_file_size + data_size > self.max_file_size {
+        let write_size = data.len();
+        if self.current_file_size + write_size > self.max_file_size {
             return Err(Errors::FileWriteError);
         }
-        self.file_contents.extend_from_slice(data);
-        self.current_file_size += data_size;
-        Ok(data_size)
+        self.file_contents[self.write_position..self.write_position + write_size]
+            .copy_from_slice(&data[..write_size]);
+        self.write_position += write_size;
+        self.current_file_size += write_size;
+        Ok(write_size)
     }
 
     async fn fsync(&mut self) -> Result<(), Errors> {
         //  TODO: Should we inject failure for fsync? Seems excessive. How do people program around that?
         self.synced_contents = self.file_contents.clone();
         Ok(())
+    }
+
+    async fn read_last_n_entries(&mut self, n: usize) -> Result<Vec<String>, Errors> {
+        // Since we're writing newline-delimited entries, split on newlines
+        let contents = String::from_utf8_lossy(&self.file_contents);
+        let entries: Vec<String> = contents
+            .lines()
+            .rev() // reverse to get last entries
+            .take(n) // take last n
+            .map(String::from)
+            .collect();
+        Ok(entries)
     }
 }
 
@@ -256,6 +325,8 @@ trait IO {
     async fn open_file(&mut self, path: &Path) -> Result<(), Errors>;
     async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors>;
     async fn get_redis_config(&mut self, key: &str) -> Result<String, Errors>;
+    async fn read_file(&mut self, size: usize) -> Result<Vec<u8>, Errors>;
+    async fn read_last_n_entries(&mut self, n: usize) -> Result<Vec<String>, Errors>;
     async fn write_to_file(&mut self, data: &str) -> Result<usize, Errors>;
     fn generate_jitter(&mut self, base_delay: Duration) -> Duration;
     async fn sleep(&mut self, duration: Duration);
@@ -352,8 +423,16 @@ impl IO for RealIO {
         }
     }
 
+    async fn read_file(&mut self, size: usize) -> Result<Vec<u8>, Errors> {
+        self.file.as_mut().unwrap().read(size).await
+    }
+
     async fn write_to_file(&mut self, data: &str) -> Result<usize, Errors> {
         self.file.as_mut().unwrap().write(data).await
+    }
+
+    async fn read_last_n_entries(&mut self, n: usize) -> Result<Vec<String>, Errors> {
+        self.file.as_mut().unwrap().read_last_n_entries(n).await
     }
 
     fn generate_jitter(&mut self, base_delay: Duration) -> Duration {
@@ -494,8 +573,16 @@ impl IO for SimulatedIO {
             .cloned()
     }
 
+    async fn read_file(&mut self, size: usize) -> Result<Vec<u8>, Errors> {
+        self.file.as_mut().unwrap().read(size).await
+    }
+
     async fn write_to_file(&mut self, data: &str) -> Result<usize, Errors> {
         self.file.as_mut().unwrap().write(data).await
+    }
+
+    async fn read_last_n_entries(&mut self, n: usize) -> Result<Vec<String>, Errors> {
+        self.file.as_mut().unwrap().read_last_n_entries(n).await
     }
 
     fn generate_jitter(&mut self, base_delay: Duration) -> Duration {
@@ -580,6 +667,7 @@ async fn start(io: &mut dyn IO) {
 async fn run(io: &mut dyn IO) {
     let config_key = "config_key";
     let mut counter = 0;
+    let mut written_messages = Vec::new();
     loop {
         counter += 1;
         trace!("Iteration {counter}");
@@ -643,7 +731,27 @@ async fn run(io: &mut dyn IO) {
         let output = format!("Config: {}, Message: {}\n", redis_config, kafka_message);
 
         match io.write_to_file(&output).await {
-            Ok(_) => (),
+            Ok(_) => {
+                written_messages.push(output.clone());
+                if counter % 5 == 0 {
+                    match io.read_last_n_entries(5).await {
+                        Ok(read_messages) => {
+                            let expected = &written_messages[written_messages.len() - 5..];
+                            if read_messages != expected {
+                                error!(
+                                    "Data verification failed! Expected {:?}, got {:?}",
+                                    expected, read_messages
+                                );
+                                panic!("Data verification failed");
+                            }
+                        }
+                        Err(e) => {
+                            error!("failed to read last n messages: {:?}", e);
+                            panic!("Failed to read back last n messages");
+                        }
+                    }
+                }
+            }
             Err(e) => {
                 error!("failed to write to file {:?}", e);
             }
