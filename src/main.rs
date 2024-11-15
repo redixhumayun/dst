@@ -1,3 +1,4 @@
+use std::sync::{Arc, Mutex};
 use std::{collections::HashMap, path::Path, time::Duration};
 
 use async_trait::async_trait;
@@ -12,7 +13,7 @@ use rdkafka::{
 };
 use redis::AsyncCommands;
 use tokio::io::AsyncWriteExt;
-use tracing::{error, info};
+use tracing::{error, info, trace, warn};
 use tracing_subscriber;
 
 enum Errors {
@@ -188,13 +189,15 @@ struct SimulatedIO {
     rng: ChaCha8Rng,
     fault_probabilities: HashMap<FaultType, f64>,
     kafka_messages: Vec<String>,
+    kafka_attempts: usize,
+    kafka_failures: usize,
     redis_data: HashMap<String, String>,
     file_contents: Vec<String>,
 }
 
 impl SimulatedIO {
     fn new(seed: u64) -> Self {
-        let rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let kafka_messages = vec![
             "simulated_message_1".to_string(),
             "simulated_message_2".to_string(),
@@ -213,6 +216,7 @@ impl SimulatedIO {
             (FaultType::FileOpenFailure, 0.1),
             (FaultType::FileWriteFailure, 0.1),
         ]);
+        let kafka_failures = rng.gen_range(1..5);
 
         Self {
             rng,
@@ -220,6 +224,8 @@ impl SimulatedIO {
             kafka_messages,
             redis_data,
             file_contents: Vec::new(),
+            kafka_attempts: 0,
+            kafka_failures,
         }
     }
 
@@ -241,37 +247,49 @@ impl IO for SimulatedIO {
         _topic: &str,
         _partition: i32,
     ) -> Result<(), Errors> {
-        if self.should_inject_fault(&FaultType::KafkaConnectionFailure) {
-            error!("Injecting fault for Kafka connection error");
+        self.kafka_attempts += 1;
+        println!("the kafka failures {:?}", self.kafka_failures);
+        println!(
+            "kafka fault {}",
+            self.should_inject_fault(&FaultType::KafkaConnectionFailure)
+        );
+        if self.should_inject_fault(&FaultType::KafkaConnectionFailure)
+            && self.kafka_attempts <= self.kafka_failures
+        {
+            warn!("Injecting fault for Kafka connection error");
             return Err(Errors::KafkaConnectionError);
         }
+        trace!("Not injecting fault for Kafka connection error");
         tokio::time::sleep(Duration::from_millis(50)).await;
         Ok(())
     }
 
     async fn connect_to_redis(&mut self, _path: &str) -> Result<(), Errors> {
         if self.should_inject_fault(&FaultType::RedisConnectionFailure) {
-            error!("Injecting fault for Redis connection error");
+            warn!("Injecting fault for Redis connection error");
             return Err(Errors::RedisConnectionError);
         }
+        trace!("Not injecting fault for Redis connection error");
         tokio::time::sleep(Duration::from_millis(50)).await;
         Ok(())
     }
 
     async fn open_file(&mut self, _path: &Path) -> Result<(), Errors> {
         if self.should_inject_fault(&FaultType::FileOpenFailure) {
-            error!("Injecting fault for file open error");
+            warn!("Injecting fault for file open error");
             return Err(Errors::FileOpenError);
         }
+        trace!("Not injecting fault for file open error");
         tokio::time::sleep(Duration::from_millis(50)).await;
         Ok(())
     }
 
     async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors> {
         if self.should_inject_fault(&FaultType::KafkaReadFailure) {
-            error!("Injecting fault for Kafka read error");
+            warn!("Injecting fault for Kafka read error");
             return Err(Errors::NoKafkaMessage);
         }
+        trace!("Not injecting fault for Kafka read error");
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(self.kafka_messages.len() > 0);
         if let Some(message) = self.kafka_messages.choose(&mut self.rng) {
@@ -282,9 +300,10 @@ impl IO for SimulatedIO {
 
     async fn get_redis_config(&mut self, key: &str) -> Result<String, Errors> {
         if self.should_inject_fault(&FaultType::RedisReadFailure) {
-            error!("Injecting fault for Redis read error");
+            warn!("Injecting fault for Redis read error");
             return Err(Errors::RedisKeyRetrievalError);
         }
+        trace!("Not injecting fault for Redis read error");
         tokio::time::sleep(Duration::from_millis(100)).await;
         self.redis_data
             .get(key)
@@ -297,6 +316,7 @@ impl IO for SimulatedIO {
             error!("Injecting fault while writing to file");
             return Err(Errors::FileWriteError);
         }
+        trace!("Not injecting fault while writing to a file");
         tokio::time::sleep(Duration::from_millis(50)).await;
         self.file_contents.push(data.to_string());
         Ok(())
@@ -325,25 +345,74 @@ async fn main() {
 }
 
 async fn start(io: &mut dyn IO) {
-    io.create_kafka_consumer("group_id", "localhost:9092", "dummy_topic", 0)
-        .await
-        .unwrap();
+    let io = Arc::new(Mutex::new(io));
+    let io_clone = Arc::clone(&io);
+    retry_with_backoff(
+        || async {
+            let mut io = io_clone.lock().unwrap();
+            io.create_kafka_consumer("group_id", "localhost:9092", "dummy_topic", 0)
+                .await
+        },
+        5,
+        Duration::from_millis(10),
+    )
+    .await
+    .unwrap();
+    let mut io = io.lock().unwrap();
     io.connect_to_redis("redis://127.0.0.1").await.unwrap();
     io.open_file(&Path::new("output.txt")).await.unwrap();
-    run(io).await;
+    run(*io).await;
 }
 
 async fn run(io: &mut dyn IO) {
     let config_key = "config_key";
-    while let Ok(Some(message)) = io.read_kafka_message().await {
-        let config_value = match io.get_redis_config(&config_key).await {
-            Ok(msg) => msg,
-            Err(_) => panic!("there was a problem while reading the config from redis"),
-        };
-        let output = format!("Config: {}, Message: {}\n", config_value, message);
-        io.write_to_file(&output)
-            .await
-            .expect("there was a problem while writing to file");
+    loop {
+        match io.read_kafka_message().await {
+            Ok(Some(message)) => {
+                let config_value = match io.get_redis_config(&config_key).await {
+                    Ok(msg) => msg,
+                    Err(_) => panic!("there was a problem while reading the config from redis"),
+                };
+                let output = format!("Config: {}, Message: {}\n", config_value, message);
+                io.write_to_file(&output)
+                    .await
+                    .expect("there was a problem while writing to the file");
+            }
+            Ok(None) => {
+                //  need to decide what to do here
+            }
+            Err(e) => {
+                error!("Error reading Kafka message: {:?}", e);
+                panic!("there was a problem while reading the Kafka message");
+            }
+        }
+    }
+}
+
+async fn retry_with_backoff<F, Fut, T, E>(
+    mut operation: F,
+    max_retries: usize,
+    base_delay: Duration,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut retries = 0;
+    let mut delay = base_delay;
+
+    loop {
+        match operation().await {
+            Ok(result) => return Ok(result),
+            Err(_) if retries < max_retries => {
+                retries += 1;
+                let jitter: u64 = rand::thread_rng().gen_range(0..delay.as_millis() as u64);
+                let delay_with_jitter = delay + Duration::from_millis(jitter);
+                tokio::time::sleep(delay_with_jitter).await;
+                delay *= 2;
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 
