@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::{collections::HashMap, path::Path, time::Duration};
 
 use async_trait::async_trait;
@@ -71,6 +71,49 @@ struct Args {
 }
 
 #[async_trait]
+trait Clock {
+    async fn sleep(&mut self, duration: Duration);
+}
+
+struct RealClock;
+
+impl RealClock {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+#[async_trait]
+impl Clock for RealClock {
+    async fn sleep(&mut self, duration: Duration) {
+        tokio::time::sleep(duration).await;
+    }
+}
+
+struct SimulatedClock {
+    current_time: Duration,
+}
+
+impl SimulatedClock {
+    fn new() -> Self {
+        Self {
+            current_time: Duration::ZERO,
+        }
+    }
+
+    fn advance(&mut self, duration: Duration) {
+        self.current_time += duration;
+    }
+}
+
+#[async_trait]
+impl Clock for SimulatedClock {
+    async fn sleep(&mut self, duration: Duration) {
+        self.advance(duration);
+    }
+}
+
+#[async_trait]
 trait IO {
     async fn create_kafka_consumer(
         &mut self,
@@ -84,20 +127,25 @@ trait IO {
     async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors>;
     async fn get_redis_config(&mut self, key: &str) -> Result<String, Errors>;
     async fn write_to_file(&mut self, data: &str) -> Result<(), Errors>;
+    fn generate_jitter(&mut self, base_delay: Duration) -> Duration;
+    async fn sleep(&mut self, duration: Duration);
 }
 
 struct RealIO {
     consumer: Option<StreamConsumer>,
     redis_connection: Option<redis::aio::MultiplexedConnection>,
     file: Option<tokio::fs::File>,
+    pub clock: Box<dyn Clock + Send>,
 }
 
 impl RealIO {
     fn new() -> Self {
+        let clock = Box::new(RealClock::new());
         Self {
             consumer: None,
             redis_connection: None,
             file: None,
+            clock,
         }
     }
 }
@@ -183,21 +231,32 @@ impl IO for RealIO {
         }
         return Err(Errors::FileOpenError);
     }
+
+    fn generate_jitter(&mut self, base_delay: Duration) -> Duration {
+        let jitter: u64 = rand::thread_rng().gen_range(0..base_delay.as_millis() as u64);
+        base_delay + Duration::from_millis(jitter)
+    }
+
+    async fn sleep(&mut self, duration: Duration) {
+        self.clock.sleep(duration).await;
+    }
 }
 
 struct SimulatedIO {
-    rng: ChaCha8Rng,
+    pub rng: ChaCha8Rng,
     fault_probabilities: HashMap<FaultType, f64>,
     kafka_messages: Vec<String>,
     kafka_attempts: usize,
     kafka_failures: usize,
     redis_data: HashMap<String, String>,
     file_contents: Vec<String>,
+    pub clock: Box<dyn Clock + Send>,
 }
 
 impl SimulatedIO {
     fn new(seed: u64) -> Self {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let clock = Box::new(SimulatedClock::new());
         let kafka_messages = vec![
             "simulated_message_1".to_string(),
             "simulated_message_2".to_string(),
@@ -226,6 +285,7 @@ impl SimulatedIO {
             file_contents: Vec::new(),
             kafka_attempts: 0,
             kafka_failures,
+            clock,
         }
     }
 
@@ -317,6 +377,15 @@ impl IO for SimulatedIO {
         self.file_contents.push(data.to_string());
         Ok(())
     }
+
+    fn generate_jitter(&mut self, base_delay: Duration) -> Duration {
+        let jitter: u64 = self.rng.gen_range(0..base_delay.as_millis() as u64);
+        base_delay + Duration::from_millis(jitter)
+    }
+
+    async fn sleep(&mut self, duration: Duration) {
+        self.clock.sleep(duration).await;
+    }
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -341,103 +410,120 @@ async fn main() {
 }
 
 async fn start(io: &mut dyn IO) {
-    let io = Arc::new(Mutex::new(io));
-    let io_clone = Arc::clone(&io);
-    retry_with_backoff(
-        || async {
-            let mut io = io_clone.lock().unwrap();
-            io.create_kafka_consumer("group_id", "localhost:9092", "dummy_topic", 0)
-                .await
-        },
-        5,
-        Duration::from_millis(10),
-        "connect_to_kafka".into(),
-    )
-    .await
-    .unwrap();
-    {
-        let mut io = io.lock().unwrap();
-        io.connect_to_redis("redis://127.0.0.1").await.unwrap();
-        io.open_file(&Path::new("output.txt")).await.unwrap();
+    let max_retries = 5;
+    let base_delay = Duration::from_millis(10);
+    let mut retries = 0;
+    let mut delay = base_delay;
+    loop {
+        match io
+            .create_kafka_consumer("group_id", "localhost:9092", "dummy_topic", 0)
+            .await
+        {
+            Ok(_) => break,
+            Err(_) if retries < max_retries => {
+                retries += 1;
+                let delay_with_jitter = io.generate_jitter(delay);
+                io.sleep(delay_with_jitter).await;
+                delay *= 2;
+            }
+            Err(err) => {
+                eprintln!("failed to create Kafka consumer: {:?}", err);
+                return;
+            }
+        }
     }
+
+    let max_retries = 5;
+    let base_delay = Duration::from_millis(10);
+    let mut retries = 0;
+    let mut delay = base_delay;
+    loop {
+        match io.connect_to_redis("redis://127.0.0.1").await {
+            Ok(_) => break,
+            Err(_) if retries < max_retries => {
+                retries += 1;
+                let delay_with_jitter = io.generate_jitter(delay);
+                io.sleep(delay_with_jitter).await;
+                delay *= 2;
+            }
+            Err(err) => {
+                eprintln!("failed to create Kafka consumer: {:?}", err);
+                return;
+            }
+        }
+    }
+
+    io.open_file(Path::new("output.txt")).await.unwrap();
     run(io).await;
 }
 
-async fn run(io: Arc<Mutex<&mut dyn IO>>) {
+async fn run(io: &mut dyn IO) {
     let config_key = "config_key";
     let mut counter = 0;
     loop {
         counter += 1;
         trace!("Iteration {counter}");
-        let io_clone = Arc::clone(&io);
-        let kafka_message = retry_with_backoff(
-            || async {
-                let mut io = io_clone.lock().unwrap();
-                match io.read_kafka_message().await {
-                    Ok(Some(message)) => Ok(message),
-                    Ok(None) => {
-                        panic!("error")
-                    }
-                    Err(e) => Err(e),
+
+        //  Get Kafka message
+        let max_retries = 5;
+        let base_delay = Duration::from_millis(10);
+        let mut retries = 0;
+        let mut delay = base_delay;
+
+        let kafka_message = loop {
+            match io.read_kafka_message().await {
+                Ok(Some(message)) => break Ok(message),
+                Ok(None) => {
+                    panic!("Error");
                 }
-            },
-            5,
-            Duration::from_millis(10),
-            "read_kafka_message".into(),
-        )
-        .await
-        .unwrap();
-        let redis_config = retry_with_backoff(
-            || async {
-                let mut io = io_clone.lock().unwrap();
-                match io.get_redis_config(&config_key).await {
-                    Ok(msg) => Ok(msg),
-                    Err(e) => Err(e),
+                Err(_) if retries < max_retries => {
+                    retries += 1;
+                    let delay_with_jitter = io.generate_jitter(delay);
+                    io.sleep(delay_with_jitter).await;
+                    delay *= 2;
                 }
-            },
-            5,
-            Duration::from_millis(10),
-            "read_redis_config",
-        )
-        .await
+                Err(err) => {
+                    error!("failed to read message from Kafka: {:?}", err);
+                    break Err(err);
+                }
+            };
+
+            if retries >= max_retries {
+                panic!("failed to read the message from Kafka after all retries",);
+            }
+        }
         .unwrap();
-        let mut io = io.lock().unwrap();
+
+        //  Get Redis config
+        let max_retries = 5;
+        let base_delay = Duration::from_millis(10);
+        let mut retries = 0;
+        let mut delay = base_delay;
+
+        let redis_config = loop {
+            match io.get_redis_config(&config_key).await {
+                Ok(message) => break Ok(message),
+                Err(_) if retries < max_retries => {
+                    retries += 1;
+                    let delay_with_jitter = io.generate_jitter(delay);
+                    io.sleep(delay_with_jitter).await;
+                    delay *= 2;
+                }
+                Err(err) => {
+                    error!("failed to read config from Redis: {:?}", err);
+                    break Err(err);
+                }
+            };
+
+            if retries >= max_retries {
+                panic!("failed to read the message from Kafka after all retries",);
+            }
+        }
+        .unwrap();
         let output = format!("Config: {}, Message: {}\n", redis_config, kafka_message);
         io.write_to_file(&output)
             .await
             .expect("there was a problem while writing to the file");
-    }
-}
-
-async fn retry_with_backoff<F, Fut, T, E>(
-    mut operation: F,
-    max_retries: usize,
-    base_delay: Duration,
-    operation_name: &str,
-) -> Result<T, E>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, E>>,
-{
-    let mut retries = 0;
-    let mut delay = base_delay;
-
-    loop {
-        trace!("trying operation {operation_name}");
-        match operation().await {
-            Ok(result) => {
-                trace!("Successfully finished operation {operation_name}");
-                return Ok(result);
-            }
-            Err(_) if retries < max_retries => {
-                retries += 1;
-                let jitter: u64 = rand::thread_rng().gen_range(0..delay.as_millis() as u64);
-                let delay_with_jitter = delay + Duration::from_millis(jitter);
-                tokio::time::sleep(delay_with_jitter).await;
-                delay *= 2;
-            }
-            Err(err) => return Err(err),
-        }
     }
 }
 
