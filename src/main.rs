@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 
 use async_trait::async_trait;
 use futures::stream::StreamExt;
@@ -11,14 +11,22 @@ use tokio::io::AsyncWriteExt;
 
 enum Errors {
     KafkaConnectionError,
+    NoKafkaMessage,
     RedisConnectionError,
+    RedisKeyRetrievalError,
+    FileOpenFailure,
+    FileWriteFailure,
 }
 
 impl std::fmt::Debug for Errors {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Errors::KafkaConnectionError => write!(f, "Kafka connection error"),
+            Errors::NoKafkaMessage => write!(f, "No Kafka message"),
             Errors::RedisConnectionError => write!(f, "Redis connection error"),
+            Errors::RedisKeyRetrievalError => write!(f, "Error retrieving redis key"),
+            Errors::FileOpenFailure => write!(f, "Failed to open file"),
+            Errors::FileWriteFailure => write!(f, "Failed to write to file"),
         }
     }
 }
@@ -27,7 +35,11 @@ impl std::fmt::Display for Errors {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Errors::KafkaConnectionError => write!(f, "Kafka connection error"),
+            Errors::NoKafkaMessage => write!(f, "No Kafka message"),
             Errors::RedisConnectionError => write!(f, "Redis connection error"),
+            Errors::RedisKeyRetrievalError => write!(f, "Error retrieving redis key"),
+            Errors::FileOpenFailure => write!(f, "Failed to open file"),
+            Errors::FileWriteFailure => write!(f, "Failed to write to file"),
         }
     }
 }
@@ -44,15 +56,26 @@ trait IO {
         partition: i32,
     ) -> Result<(), Errors>;
     async fn connect_to_redis(&mut self, url: &str) -> Result<(), Errors>;
+    async fn open_file(&mut self, path: &Path) -> Result<(), Errors>;
     async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors>;
     async fn get_redis_config(&mut self, key: &str) -> Result<String, Errors>;
-    async fn write_to_file(&mut self, output: &str) -> Result<(), Errors>;
+    async fn write_to_file(&mut self, data: &str) -> Result<(), Errors>;
 }
 
 struct RealIO {
     consumer: Option<StreamConsumer>,
     redis_connection: Option<redis::aio::MultiplexedConnection>,
     file: Option<tokio::fs::File>,
+}
+
+impl RealIO {
+    fn new() -> Self {
+        Self {
+            consumer: None,
+            redis_connection: None,
+            file: None,
+        }
+    }
 }
 
 #[async_trait]
@@ -79,76 +102,86 @@ impl IO for RealIO {
     }
 
     async fn connect_to_redis(&mut self, url: &str) -> Result<(), Errors> {
-        let client = redis::Client::open("redis::127.0.0.1").expect("Invalid redis URL");
+        let client = redis::Client::open(url).map_err(|_| Errors::RedisConnectionError)?;
+        let connection = client
+            .get_multiplexed_async_connection()
+            .await
+            .map_err(|_| Errors::RedisConnectionError)?;
+        self.redis_connection = Some(connection);
         Ok(())
+    }
+
+    async fn open_file(&mut self, path: &Path) -> Result<(), Errors> {
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(path)
+            .await
+            .map_err(|_| Errors::FileOpenFailure)?;
+        self.file = Some(file);
+        Ok(())
+    }
+
+    async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors> {
+        if let Some(consumer) = &self.consumer {
+            let message = consumer.stream().next().await;
+            let msg = match message {
+                Some(Ok(msg)) => msg
+                    .payload()
+                    .map(|payload| String::from_utf8_lossy(payload).into_owned()),
+                _ => return Err(Errors::NoKafkaMessage),
+            };
+            return Ok(msg);
+        }
+        Ok(None)
+    }
+
+    async fn get_redis_config(&mut self, key: &str) -> Result<String, Errors> {
+        if let Some(redis_conn) = &mut self.redis_connection {
+            match redis_conn.get(key).await {
+                Ok(value) => Ok(value),
+                Err(_) => Err(Errors::RedisKeyRetrievalError),
+            }
+        } else {
+            Err(Errors::RedisConnectionError)
+        }
+    }
+
+    async fn write_to_file(&mut self, data: &str) -> Result<(), Errors> {
+        if let Some(file) = &mut self.file {
+            file.write_all(data.as_bytes())
+                .await
+                .map_err(|_| Errors::FileWriteFailure)?;
+            return Ok(());
+        }
+        return Err(Errors::FileOpenFailure);
     }
 }
 
 #[tokio::main]
 async fn main() {
     //  the main loop of the function that consumes from upstream kafka, reads from Redis and publishes to downstream Kafka
-    run().await;
+    let mut io = RealIO::new();
+    io.create_kafka_consumer("group_id", "localhost:9092", "dummy_topic", 0)
+        .await
+        .unwrap();
+    io.connect_to_redis("redis://127.0.0.1").await.unwrap();
+    io.open_file(&Path::new("output.txt")).await.unwrap();
+    run(&mut io).await;
 }
 
-async fn run() {
-    let consumer: StreamConsumer = ClientConfig::new()
-        .set("group.id", "example_group")
-        .set("bootstrap.servers", "localhost:9092")
-        .create()
-        .expect("Consumer creation failed");
-    let topic = "dummy_topic";
-    let partition = 0;
-
-    //  Kafka consumer setup
-    let mut tpl = TopicPartitionList::new();
-    tpl.add_partition_offset(topic, partition, rdkafka::Offset::Beginning)
-        .expect("Failed to add partition");
-    consumer.assign(&tpl).expect("failed to assign partition");
-    let mut message_stream = consumer.stream();
-
-    //  Redis client setup
-    let client = redis::Client::open("redis::127.0.0.1").expect("Invalid Redis url");
-    let mut connection = client
-        .get_multiplexed_async_connection()
-        .await
-        .expect("Failed to connect to redis");
-
-    //  Read config data from Redis
+async fn run(io: &mut dyn IO) {
     let config_key = "config_key";
-
-    //  Open the file handle for writing
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(true)
-        .open("output.txt")
-        .await
-        .expect("Failed to open file");
-
-    while let Some(message) = message_stream.next().await {
-        match message {
-            Ok(msg) => {
-                let config_value: String = connection
-                    .get(config_key)
-                    .await
-                    .expect("Failed to get config data from Redis");
-                if let Some(payload) = msg.payload() {
-                    println!("Received message: {:?}", String::from_utf8_lossy(payload));
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    let output = format!(
-                        "Config: {}, Message: {}\n",
-                        config_value,
-                        String::from_utf8_lossy(payload)
-                    );
-                    file.write_all(output.as_bytes())
-                        .await
-                        .expect("Failed to write to file");
-                }
-            }
-            Err(e) => {
-                eprintln!("error reading from Kafka {:?}", e);
-            }
-        }
+    while let Ok(Some(message)) = io.read_kafka_message().await {
+        let config_value = match io.get_redis_config(&config_key).await {
+            Ok(msg) => msg,
+            Err(_) => panic!("there was a problem while reading the config from redis"),
+        };
+        let output = format!("Config: {}, Message: {}\n", config_value, message);
+        io.write_to_file(&output)
+            .await
+            .expect("there was a problem while writing to file");
     }
 }
 
