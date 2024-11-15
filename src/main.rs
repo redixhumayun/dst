@@ -253,10 +253,10 @@ trait IO {
         partition: i32,
     ) -> Result<(), Errors>;
     async fn connect_to_redis(&mut self, url: &str) -> Result<(), Errors>;
-    async fn open_file(&mut self, path: &Path) -> Result<Box<dyn File>, Errors>;
+    async fn open_file(&mut self, path: &Path) -> Result<(), Errors>;
     async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors>;
     async fn get_redis_config(&mut self, key: &str) -> Result<String, Errors>;
-    async fn write_to_file(&mut self, data: &str) -> Result<(), Errors>;
+    async fn write_to_file(&mut self, data: &str) -> Result<usize, Errors>;
     fn generate_jitter(&mut self, base_delay: Duration) -> Duration;
     async fn sleep(&mut self, duration: Duration);
 }
@@ -264,7 +264,7 @@ trait IO {
 struct RealIO {
     consumer: Option<StreamConsumer>,
     redis_connection: Option<redis::aio::MultiplexedConnection>,
-    file: Option<tokio::fs::File>,
+    file: Option<RealFile>,
     pub clock: Box<dyn Clock + Send>,
 }
 
@@ -315,7 +315,7 @@ impl IO for RealIO {
         Ok(())
     }
 
-    async fn open_file(&mut self, path: &Path) -> Result<Box<dyn File>, Errors> {
+    async fn open_file(&mut self, path: &Path) -> Result<(), Errors> {
         let file = tokio::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -323,7 +323,8 @@ impl IO for RealIO {
             .open(path)
             .await
             .map_err(|_| Errors::FileOpenError)?;
-        Ok(Box::new(RealFile { file: Some(file) }))
+        self.file = Some(RealFile { file: Some(file) });
+        Ok(())
     }
 
     async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors> {
@@ -351,14 +352,8 @@ impl IO for RealIO {
         }
     }
 
-    async fn write_to_file(&mut self, data: &str) -> Result<(), Errors> {
-        if let Some(file) = &mut self.file {
-            file.write_all(data.as_bytes())
-                .await
-                .map_err(|_| Errors::FileWriteError)?;
-            return Ok(());
-        }
-        return Err(Errors::FileOpenError);
+    async fn write_to_file(&mut self, data: &str) -> Result<usize, Errors> {
+        self.file.as_mut().unwrap().write(data).await
     }
 
     fn generate_jitter(&mut self, base_delay: Duration) -> Duration {
@@ -372,14 +367,14 @@ impl IO for RealIO {
 }
 
 struct SimulatedIO {
-    pub rng: ChaCha8Rng,
+    rng: ChaCha8Rng,
     fault_probabilities: HashMap<FaultType, f64>,
     kafka_messages: Vec<String>,
     kafka_attempts: usize,
     kafka_failures: usize,
     redis_data: HashMap<String, String>,
-    file_contents: Vec<String>,
-    pub clock: Box<dyn Clock + Send>,
+    file: Option<SimulatedFile>,
+    clock: Box<dyn Clock + Send>,
 }
 
 impl SimulatedIO {
@@ -411,7 +406,7 @@ impl SimulatedIO {
             fault_probabilities,
             kafka_messages,
             redis_data,
-            file_contents: Vec::new(),
+            file: None,
             kafka_attempts: 0,
             kafka_failures,
             clock,
@@ -458,7 +453,7 @@ impl IO for SimulatedIO {
         Ok(())
     }
 
-    async fn open_file(&mut self, path: &Path) -> Result<Box<dyn File>, Errors> {
+    async fn open_file(&mut self, path: &Path) -> Result<(), Errors> {
         let file = tokio::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -467,7 +462,8 @@ impl IO for SimulatedIO {
             .await
             .map_err(|_| Errors::FileOpenError)?;
         let sim_file = SimulatedFile::new(self.rng.clone(), RealFile { file: Some(file) });
-        Ok(Box::new(sim_file))
+        self.file = Some(sim_file);
+        Ok(())
     }
 
     async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors> {
@@ -498,15 +494,8 @@ impl IO for SimulatedIO {
             .cloned()
     }
 
-    async fn write_to_file(&mut self, data: &str) -> Result<(), Errors> {
-        if self.should_inject_fault(&FaultType::FileWriteFailure) {
-            warn!("Injecting fault while writing to file");
-            return Err(Errors::FileWriteError);
-        }
-        trace!("Not injecting fault while writing to a file");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        self.file_contents.push(data.to_string());
-        Ok(())
+    async fn write_to_file(&mut self, data: &str) -> Result<usize, Errors> {
+        self.file.as_mut().unwrap().write(data).await
     }
 
     fn generate_jitter(&mut self, base_delay: Duration) -> Duration {
@@ -659,8 +648,5 @@ async fn run(io: &mut dyn IO) {
                 error!("failed to write to file {:?}", e);
             }
         }
-        io.write_to_file(&output)
-            .await
-            .expect("there was a problem while writing to the file");
     }
 }
