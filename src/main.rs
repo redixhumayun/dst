@@ -11,6 +11,7 @@ use rdkafka::{
     ClientConfig, Message, TopicPartitionList,
 };
 use redis::AsyncCommands;
+use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tracing::{error, info, trace, warn};
 use tracing_subscriber;
@@ -21,7 +22,9 @@ enum Errors {
     RedisConnectionError,
     RedisKeyRetrievalError,
     FileOpenError,
+    FileReadError,
     FileWriteError,
+    FileSyncError,
 }
 
 impl std::fmt::Debug for Errors {
@@ -32,7 +35,9 @@ impl std::fmt::Debug for Errors {
             Errors::RedisConnectionError => write!(f, "Redis connection error"),
             Errors::RedisKeyRetrievalError => write!(f, "Error retrieving redis key"),
             Errors::FileOpenError => write!(f, "Failed to open file"),
+            Errors::FileReadError => write!(f, "Failed to read from file"),
             Errors::FileWriteError => write!(f, "Failed to write to file"),
+            Errors::FileSyncError => write!(f, "Failed to sync file"),
         }
     }
 }
@@ -45,7 +50,9 @@ impl std::fmt::Display for Errors {
             Errors::RedisConnectionError => write!(f, "Redis connection error"),
             Errors::RedisKeyRetrievalError => write!(f, "Error retrieving redis key"),
             Errors::FileOpenError => write!(f, "Failed to open file"),
+            Errors::FileReadError => write!(f, "Failed to read from file"),
             Errors::FileWriteError => write!(f, "Failed to write to file"),
+            Errors::FileSyncError => write!(f, "Failed to sync file"),
         }
     }
 }
@@ -60,6 +67,14 @@ enum FaultType {
     RedisReadFailure,
     FileOpenFailure,
     FileWriteFailure,
+}
+
+#[derive(Eq, PartialEq, Hash)]
+enum FileFaultType {
+    FileReadFailure,
+    FileWriteFailure,
+    FileSizeExceededFailure,
+    FileMetadataSyncFailure,
 }
 
 #[derive(Parser, Debug)]
@@ -113,6 +128,122 @@ impl Clock for SimulatedClock {
 }
 
 #[async_trait]
+trait File {
+    async fn read(&mut self, size: usize) -> Result<Vec<u8>, Errors>;
+    async fn write(&mut self, data: &str) -> Result<usize, Errors>;
+    async fn fsync(&mut self) -> Result<(), Errors>;
+}
+
+struct RealFile {
+    file: Option<tokio::fs::File>,
+}
+
+#[async_trait]
+impl File for RealFile {
+    async fn read(&mut self, size: usize) -> Result<Vec<u8>, Errors> {
+        let mut buffer = vec![0; size];
+        self.file
+            .as_mut()
+            .unwrap()
+            .read(&mut buffer)
+            .await
+            .map_err(|_| Errors::FileReadError)?;
+        Ok(buffer)
+    }
+
+    async fn write(&mut self, data: &str) -> Result<usize, Errors> {
+        self.file
+            .as_mut()
+            .unwrap()
+            .write(data.as_bytes())
+            .await
+            .map_err(|_| Errors::FileWriteError)
+    }
+
+    async fn fsync(&mut self) -> Result<(), Errors> {
+        self.file
+            .as_mut()
+            .unwrap()
+            .sync_all()
+            .await
+            .map_err(|_| Errors::FileSyncError)
+    }
+}
+
+struct SimulatedFile {
+    rng: ChaCha8Rng,
+    file_contents: Vec<u8>,
+    synced_contents: Vec<u8>,
+    current_file_size: usize,
+    max_file_size: usize,
+    inner: RealFile,
+    fault_probabilities: HashMap<FileFaultType, f64>,
+}
+
+impl SimulatedFile {
+    fn new(rng: ChaCha8Rng, io: RealFile) -> Self {
+        let fault_probabilities = HashMap::from([
+            (FileFaultType::FileReadFailure, 0.1),
+            (FileFaultType::FileWriteFailure, 0.1),
+            (FileFaultType::FileSizeExceededFailure, 0.1),
+            (FileFaultType::FileMetadataSyncFailure, 0.1),
+        ]);
+        Self {
+            rng,
+            file_contents: Vec::new(),
+            synced_contents: Vec::new(),
+            current_file_size: 0,
+            max_file_size: 0,
+            inner: io,
+            fault_probabilities,
+        }
+    }
+
+    fn should_inject_fault(&mut self, fault_type: &FileFaultType) -> bool {
+        if let Some(&probability) = self.fault_probabilities.get(fault_type) {
+            self.rng.gen_bool(probability)
+        } else {
+            false
+        }
+    }
+}
+
+#[async_trait]
+impl File for SimulatedFile {
+    async fn read(&mut self, size: usize) -> Result<Vec<u8>, Errors> {
+        if self.should_inject_fault(&FileFaultType::FileReadFailure) {
+            warn!("Injecting fault while reading from file");
+            return Err(Errors::FileReadError);
+        }
+        let buffer = vec![0; size];
+        assert!(size < self.file_contents.len());
+        self.file_contents[..size].clone_from_slice(&buffer);
+        Ok(buffer)
+    }
+
+    async fn write(&mut self, data: &str) -> Result<usize, Errors> {
+        if self.should_inject_fault(&FileFaultType::FileWriteFailure) {
+            warn!("Injecting fault while writing to file");
+            return Err(Errors::FileWriteError);
+        }
+        let data = data.as_bytes();
+        let data_size = data.len();
+        if self.current_file_size + data_size > self.max_file_size {
+            return Err(Errors::FileWriteError);
+        }
+        self.file_contents.extend_from_slice(data);
+        self.current_file_size += data_size;
+        Ok(data_size)
+    }
+
+    async fn fsync(&mut self) -> Result<(), Errors> {
+        //  TODO: Should we inject failure for fsync? Seems excessive. How do people program around that?
+        self.synced_contents = self.file_contents.clone();
+        Ok(())
+    }
+}
+
+#[async_trait]
 trait IO {
     async fn create_kafka_consumer(
         &mut self,
@@ -122,7 +253,7 @@ trait IO {
         partition: i32,
     ) -> Result<(), Errors>;
     async fn connect_to_redis(&mut self, url: &str) -> Result<(), Errors>;
-    async fn open_file(&mut self, path: &Path) -> Result<(), Errors>;
+    async fn open_file(&mut self, path: &Path) -> Result<Box<dyn File>, Errors>;
     async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors>;
     async fn get_redis_config(&mut self, key: &str) -> Result<String, Errors>;
     async fn write_to_file(&mut self, data: &str) -> Result<(), Errors>;
@@ -184,7 +315,7 @@ impl IO for RealIO {
         Ok(())
     }
 
-    async fn open_file(&mut self, path: &Path) -> Result<(), Errors> {
+    async fn open_file(&mut self, path: &Path) -> Result<Box<dyn File>, Errors> {
         let file = tokio::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -192,8 +323,7 @@ impl IO for RealIO {
             .open(path)
             .await
             .map_err(|_| Errors::FileOpenError)?;
-        self.file = Some(file);
-        Ok(())
+        Ok(Box::new(RealFile { file: Some(file) }))
     }
 
     async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors> {
@@ -328,14 +458,16 @@ impl IO for SimulatedIO {
         Ok(())
     }
 
-    async fn open_file(&mut self, _path: &Path) -> Result<(), Errors> {
-        if self.should_inject_fault(&FaultType::FileOpenFailure) {
-            warn!("Injecting fault for file open error");
-            return Err(Errors::FileOpenError);
-        }
-        trace!("Not injecting fault for file open error");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        Ok(())
+    async fn open_file(&mut self, path: &Path) -> Result<Box<dyn File>, Errors> {
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(true)
+            .open(path)
+            .await
+            .map_err(|_| Errors::FileOpenError)?;
+        let sim_file = SimulatedFile::new(self.rng.clone(), RealFile { file: Some(file) });
+        Ok(Box::new(sim_file))
     }
 
     async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors> {
@@ -520,6 +652,13 @@ async fn run(io: &mut dyn IO) {
         }
         .unwrap();
         let output = format!("Config: {}, Message: {}\n", redis_config, kafka_message);
+
+        match io.write_to_file(&output).await {
+            Ok(_) => (),
+            Err(e) => {
+                error!("failed to write to file {:?}", e);
+            }
+        }
         io.write_to_file(&output)
             .await
             .expect("there was a problem while writing to the file");
