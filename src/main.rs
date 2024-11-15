@@ -248,11 +248,6 @@ impl IO for SimulatedIO {
         _partition: i32,
     ) -> Result<(), Errors> {
         self.kafka_attempts += 1;
-        println!("the kafka failures {:?}", self.kafka_failures);
-        println!(
-            "kafka fault {}",
-            self.should_inject_fault(&FaultType::KafkaConnectionFailure)
-        );
         if self.should_inject_fault(&FaultType::KafkaConnectionFailure)
             && self.kafka_attempts <= self.kafka_failures
         {
@@ -299,6 +294,7 @@ impl IO for SimulatedIO {
     }
 
     async fn get_redis_config(&mut self, key: &str) -> Result<String, Errors> {
+        trace!("calling get_redis_config");
         if self.should_inject_fault(&FaultType::RedisReadFailure) {
             warn!("Injecting fault for Redis read error");
             return Err(Errors::RedisKeyRetrievalError);
@@ -313,7 +309,7 @@ impl IO for SimulatedIO {
 
     async fn write_to_file(&mut self, data: &str) -> Result<(), Errors> {
         if self.should_inject_fault(&FaultType::FileWriteFailure) {
-            error!("Injecting fault while writing to file");
+            warn!("Injecting fault while writing to file");
             return Err(Errors::FileWriteError);
         }
         trace!("Not injecting fault while writing to a file");
@@ -355,37 +351,61 @@ async fn start(io: &mut dyn IO) {
         },
         5,
         Duration::from_millis(10),
+        "connect_to_kafka".into(),
     )
     .await
     .unwrap();
-    let mut io = io.lock().unwrap();
-    io.connect_to_redis("redis://127.0.0.1").await.unwrap();
-    io.open_file(&Path::new("output.txt")).await.unwrap();
-    run(*io).await;
+    {
+        let mut io = io.lock().unwrap();
+        io.connect_to_redis("redis://127.0.0.1").await.unwrap();
+        io.open_file(&Path::new("output.txt")).await.unwrap();
+    }
+    run(io).await;
 }
 
-async fn run(io: &mut dyn IO) {
+async fn run(io: Arc<Mutex<&mut dyn IO>>) {
     let config_key = "config_key";
+    let mut counter = 0;
     loop {
-        match io.read_kafka_message().await {
-            Ok(Some(message)) => {
-                let config_value = match io.get_redis_config(&config_key).await {
-                    Ok(msg) => msg,
-                    Err(_) => panic!("there was a problem while reading the config from redis"),
-                };
-                let output = format!("Config: {}, Message: {}\n", config_value, message);
-                io.write_to_file(&output)
-                    .await
-                    .expect("there was a problem while writing to the file");
-            }
-            Ok(None) => {
-                //  need to decide what to do here
-            }
-            Err(e) => {
-                error!("Error reading Kafka message: {:?}", e);
-                panic!("there was a problem while reading the Kafka message");
-            }
-        }
+        counter += 1;
+        trace!("Iteration {counter}");
+        let io_clone = Arc::clone(&io);
+        let kafka_message = retry_with_backoff(
+            || async {
+                let mut io = io_clone.lock().unwrap();
+                match io.read_kafka_message().await {
+                    Ok(Some(message)) => Ok(message),
+                    Ok(None) => {
+                        panic!("error")
+                    }
+                    Err(e) => Err(e),
+                }
+            },
+            5,
+            Duration::from_millis(10),
+            "read_kafka_message".into(),
+        )
+        .await
+        .unwrap();
+        let redis_config = retry_with_backoff(
+            || async {
+                let mut io = io_clone.lock().unwrap();
+                match io.get_redis_config(&config_key).await {
+                    Ok(msg) => Ok(msg),
+                    Err(e) => Err(e),
+                }
+            },
+            5,
+            Duration::from_millis(10),
+            "read_redis_config",
+        )
+        .await
+        .unwrap();
+        let mut io = io.lock().unwrap();
+        let output = format!("Config: {}, Message: {}\n", redis_config, kafka_message);
+        io.write_to_file(&output)
+            .await
+            .expect("there was a problem while writing to the file");
     }
 }
 
@@ -393,6 +413,7 @@ async fn retry_with_backoff<F, Fut, T, E>(
     mut operation: F,
     max_retries: usize,
     base_delay: Duration,
+    operation_name: &str,
 ) -> Result<T, E>
 where
     F: FnMut() -> Fut,
@@ -402,8 +423,12 @@ where
     let mut delay = base_delay;
 
     loop {
+        trace!("trying operation {operation_name}");
         match operation().await {
-            Ok(result) => return Ok(result),
+            Ok(result) => {
+                trace!("Successfully finished operation {operation_name}");
+                return Ok(result);
+            }
             Err(_) if retries < max_retries => {
                 retries += 1;
                 let jitter: u64 = rand::thread_rng().gen_range(0..delay.as_millis() as u64);
