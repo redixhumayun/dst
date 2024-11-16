@@ -318,6 +318,10 @@ impl File for SimulatedFile {
             .rev() // reverse to get last entries
             .take(n) // take last n
             .map(String::from)
+            .map(|line| format!("{}\n", line))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
             .collect();
         Ok(entries)
     }
@@ -805,9 +809,7 @@ async fn run_simulation_step(
             if *counter % 5 == 0 {
                 match io.read_last_n_entries(5).await {
                     Ok(read_messages) => {
-                        info!("the read messages {:?}", read_messages);
                         let expected = &written_messages[written_messages.len() - 5..];
-                        info!("the expected messages {:?}", expected);
                         if read_messages != expected {
                             return Err(Errors::FileReadError);
                         }
