@@ -1,22 +1,19 @@
-## What Am I Trying To Show
-* A simple loop of reading from upstream Kafka, reading some data from Redis and optionally writing to a downstream Kafka. The important thing here is to hide everything behind an IO interface
-* The IO interface should be swappable with something that runs simulated IO
-* The loops should be thread-per-core so run as many threads as there are cores, each with it's own loop. (is this really important?)
-* Perhaps a TUI based game that allows users to "see" their simulation and they can keep fixing their code and re-run the simulation to pass the program
+## SimulatIOn
+SimulatIOn is a Determinstic Simulation Testing(DST) setup for educational purposes. If you're interested in learning about more about DST, read [this post](https://notes.eatonphil.com/2024-08-20-deterministic-simulation-testing.html).
 
+## Running This Project
+* Clone the repo or fork the repo
+* Build it with `cargo build`
+* Run the simulator with `cargo run -- --simulate`. If you want to pass a specific seed value, `SEED=12920692343208412637 cargo run -- --simulate`
+* Run the visualisation engine with `cargo run -- --game`. If you want to pass a specific seed value, `SEED=12920692343208412637 cargo run -- --game`
 
-## Implementation Notes
-* Okay, I have some basic code that can read from Kafka, Redis & then write to disk. I now want to be able to simulate these forms of IO.
-* After simulating IO, I should be able to inject faults into the operations
-* What are my main operations?
-  * connecting to Kafka
-  * reading from Kafka (can data arrive out-of-order from Kafka?)
-  * reading config from Redis
-  * writing to a file
-  * reading from a file (?)
+## Modeling Errors
+This project models a few standard errors:
+* Connection errors
+* File write failures
+* Corrupted messages via Kafka
 
-
-TODO: Need to think about what kind of faults can be injected here. 
+The base idea is that with a specific seed, you can recreate a completely deterministic run.
 
 ## Resources
 
