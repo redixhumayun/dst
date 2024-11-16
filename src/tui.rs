@@ -54,16 +54,20 @@ impl FaultType {
 
     fn to_log_message(&self) -> String {
         match self {
-            FaultType::KafkaConnectionFailure => "Kafka connection failed".to_string(),
-            FaultType::RedisConnectionFailure => "Redis connection failed".to_string(),
-            FaultType::KafkaReadFailure => "Kafka read failed".to_string(),
-            FaultType::RedisReadFailure => "Redis read failed".to_string(),
-            FaultType::FileOpenFailure => "File open failed".to_string(),
+            FaultType::KafkaConnectionFailure => "Kafka connection failure injected".to_string(),
+            FaultType::RedisConnectionFailure => "Redis connection failure injected".to_string(),
+            FaultType::KafkaReadFailure => "Kafka read failure injected".to_string(),
+            FaultType::RedisReadFailure => "Redis read failure injected".to_string(),
+            FaultType::FileOpenFailure => "File open failure injected".to_string(),
             FaultType::FileFaultType(fault) => match fault {
-                FileFaultType::FileReadFailure => "File read failed".to_string(),
-                FileFaultType::FileWriteFailure => "File write failed".to_string(),
-                FileFaultType::FileSizeExceededFailure => "File size exceeded".to_string(),
-                FileFaultType::FileMetadataSyncFailure => "File metadata sync failed".to_string(),
+                FileFaultType::FileReadFailure => "File read failure injected".to_string(),
+                FileFaultType::FileWriteFailure => "File write failure injected".to_string(),
+                FileFaultType::FileSizeExceededFailure => {
+                    "File size exceeded failure injected".to_string()
+                }
+                FileFaultType::FileMetadataSyncFailure => {
+                    "File metadata sync failure injected".to_string()
+                }
             },
         }
     }
