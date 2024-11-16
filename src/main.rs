@@ -776,6 +776,7 @@ async fn run_simulation_step(
             return Err(Errors::NoKafkaMessage);
         }
     }?;
+    info!("DONE READING MESSAGE FROM KAFKA");
 
     //  Get Redis config
     let max_retries = 5;
@@ -801,6 +802,7 @@ async fn run_simulation_step(
             return Err(Errors::RedisKeyRetrievalError);
         }
     }?;
+    info!("DONE READING MESSAGE FROM REDIS");
 
     let output = format!("Config: {}, Message: {}\n", redis_config, kafka_message);
     match io.write_to_file(&output).await {
@@ -820,6 +822,7 @@ async fn run_simulation_step(
                     }
                 }
             }
+            info!("DONE WRITING OUTPUT TO FILE");
             Ok(io.get_generated_faults())
         }
         Err(e) => {
