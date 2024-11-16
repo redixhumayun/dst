@@ -1,6 +1,6 @@
 use std::{
     collections::VecDeque,
-    io,
+    default, io,
     time::{Duration, Instant, SystemTime},
 };
 
@@ -107,13 +107,23 @@ impl GameState {
     }
 }
 
+#[derive(Default, PartialEq)]
+enum AppState {
+    #[default]
+    StartScreen,
+    Running,
+    GameOver,
+}
+
 #[derive(Default)]
 struct App {
+    state: AppState,
     active_faults: VecDeque<(FaultType, u8)>,
     fault_log: VecDeque<String>,
     status_log: VecDeque<String>,
     status_log_counter: usize,
     tick_count: u64,
+    death_reason: Option<String>,
 }
 
 impl App {
@@ -123,6 +133,23 @@ impl App {
         if self.fault_log.len() > 20 {
             self.fault_log.pop_front();
         }
+    }
+
+    fn add_connection_status_messages(&mut self) {
+        let messages = [
+            format!("[{}] Connected to Kafka", self.status_log_counter),
+            format!("[{}] Connected to Redis", self.status_log_counter + 1),
+            format!("[{}] Opened file descriptor", self.status_log_counter + 2),
+        ];
+
+        for message in messages {
+            self.status_log.push_back(message);
+        }
+
+        while self.status_log.len() > 50 {
+            self.status_log.pop_front();
+        }
+        self.status_log_counter += 3;
     }
 
     fn add_status_messages(&mut self) {
@@ -159,7 +186,7 @@ impl App {
             }
         }
     }
-    //  Run the main loop and show the UI until the user presses quit
+
     pub async fn run(
         &mut self,
         terminal: &mut DefaultTerminal,
@@ -171,52 +198,76 @@ impl App {
         let mut written_messages = Vec::new();
         let mut counter = 0;
         let mut has_initialised = false;
+
         loop {
-            //  listen for quit events
             if event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
-                    if key.code == KeyCode::Char('q') {
-                        break;
+                    match self.state {
+                        AppState::StartScreen => match key.code {
+                            KeyCode::Enter => {
+                                self.state = AppState::Running;
+                            }
+                            _ => (),
+                        },
+                        AppState::Running => {
+                            if key.code == KeyCode::Char('q') {
+                                break;
+                            }
+                        }
+                        AppState::GameOver => {
+                            if key.code == KeyCode::Enter {
+                                break;
+                            }
+                        }
                     }
                 }
             }
 
-            if !has_initialised {
-                match init_components(io).await {
+            if self.state == AppState::Running {
+                if !has_initialised {
+                    match init_components(io).await {
+                        Ok(faults) => {
+                            for fault in faults {
+                                self.add_fault(fault);
+                            }
+                            has_initialised = true;
+                            self.add_connection_status_messages();
+                        }
+                        Err(e) => {
+                            //  TODO: Found an error. What should I do? Log it?
+                            error!("error while initialising components for simulation {:?}", e);
+                            self.death_reason = Some(format!("{:?}", e));
+                            self.state = AppState::GameOver;
+                            break;
+                        }
+                    }
+                }
+                info!("Done initialising the components while running game loop");
+
+                match run_simulation_step(io, config_key, &mut counter, &mut written_messages).await
+                {
                     Ok(faults) => {
+                        info!("the generated faults {:?}", faults);
                         for fault in faults {
                             self.add_fault(fault);
                         }
-                        has_initialised = true;
+                        self.add_status_messages();
                     }
                     Err(e) => {
                         //  TODO: Found an error. What should I do? Log it?
-                        break;
+                        error!("error while running run_simulation_step {:?}", e);
+                        self.death_reason = Some(format!("{:?}", e));
+                        self.state = AppState::GameOver;
                     }
                 }
-            }
-            info!("Done initialising the components while running game loop");
+                trace!("ran single step of the simulation");
 
-            match run_simulation_step(io, config_key, &mut counter, &mut written_messages).await {
-                Ok(faults) => {
-                    info!("the generated faults {:?}", faults);
-                    for fault in faults {
-                        self.add_fault(fault);
-                    }
-                    self.add_status_messages();
-                }
-                Err(e) => {
-                    //  TODO: Found an error. What should I do? Log it?
-                    error!("error while running run_simulation_step {:?}", e);
-                    break;
+                if last_tick.elapsed() >= tick_rate {
+                    self.tick();
+                    last_tick = Instant::now();
                 }
             }
-            trace!("ran single step of the simulation");
 
-            if last_tick.elapsed() >= tick_rate {
-                self.tick();
-                last_tick = Instant::now();
-            }
             terminal.draw(|frame| {
                 self.draw(frame);
             })?;
@@ -226,6 +277,71 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) -> io::Result<()> {
         trace!("running the draw function");
+        match self.state {
+            AppState::StartScreen => self.render_start_screen(frame),
+            AppState::Running => self.render_game_screen(frame),
+            AppState::GameOver => self.render_game_over_screen(frame),
+        };
+
+        Ok(())
+    }
+
+    fn render_start_screen(&mut self, frame: &mut Frame) -> io::Result<()> {
+        let area = frame.area();
+
+        let start_message = vec![
+            "Welcome to the Fault Injection Simulator",
+            "",
+            "Press 'Enter' to start",
+            "Press 'q' to quit",
+        ]
+        .join("\n");
+
+        let paragraph = Paragraph::new(start_message)
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Green))
+                    .title("Fault Injection Simulator"),
+            )
+            .style(Style::default().add_modifier(Modifier::BOLD));
+
+        frame.render_widget(paragraph, area);
+        Ok(())
+    }
+
+    fn render_game_over_screen(&self, frame: &mut Frame) -> io::Result<()> {
+        let area = frame.area();
+
+        let game_over_message = vec![
+            "💀 SIMULATION CRASHED 💀".into(),
+            "".into(),
+            if let Some(reason) = &self.death_reason {
+                format!("Reason: {}", reason)
+            } else {
+                "Reason: Unknown error occurred".to_string()
+            },
+            "".into(),
+            "Press 'Enter' to exit".into(),
+        ]
+        .join("\n");
+
+        let paragraph = Paragraph::new(game_over_message)
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Red))
+                    .title("Game Over"),
+            )
+            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+
+        frame.render_widget(paragraph, area);
+        Ok(())
+    }
+
+    fn render_game_screen(&mut self, frame: &mut Frame) -> io::Result<()> {
         let size = frame.area();
 
         //  Split the screen horizontally into two main sections (top & bottom)
@@ -247,7 +363,6 @@ impl App {
         frame.render_widget(app_view, top_layout[0]);
         frame.render_widget(fault_view, top_layout[1]);
         frame.render_widget(status_view, main_layout[1]);
-
         Ok(())
     }
 
