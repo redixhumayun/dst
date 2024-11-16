@@ -25,6 +25,7 @@ mod tui;
 pub enum Errors {
     KafkaConnectionError,
     NoKafkaMessage,
+    InvalidKafkaMessage,
     RedisConnectionError,
     RedisKeyRetrievalError,
     FileOpenError,
@@ -39,6 +40,7 @@ impl std::fmt::Debug for Errors {
         match self {
             Errors::KafkaConnectionError => write!(f, "Kafka connection error"),
             Errors::NoKafkaMessage => write!(f, "No Kafka message"),
+            Errors::InvalidKafkaMessage => write!(f, "Invalid Kafka message"),
             Errors::RedisConnectionError => write!(f, "Redis connection error"),
             Errors::RedisKeyRetrievalError => write!(f, "Error retrieving redis key"),
             Errors::FileOpenError => write!(f, "Failed to open file"),
@@ -55,6 +57,7 @@ impl std::fmt::Display for Errors {
         match self {
             Errors::KafkaConnectionError => write!(f, "Kafka connection error"),
             Errors::NoKafkaMessage => write!(f, "No Kafka message"),
+            Errors::InvalidKafkaMessage => write!(f, "Invalid Kafka message"),
             Errors::RedisConnectionError => write!(f, "Redis connection error"),
             Errors::RedisKeyRetrievalError => write!(f, "Error retrieving redis key"),
             Errors::FileOpenError => write!(f, "Failed to open file"),
@@ -72,6 +75,7 @@ impl std::error::Error for Errors {}
 enum FaultType {
     KafkaConnectionFailure,
     KafkaReadFailure,
+    KafkaInvalidMessage,
     RedisConnectionFailure,
     RedisReadFailure,
     FileOpenFailure,
@@ -497,6 +501,7 @@ impl SimulatedIO {
         let fault_probabilities = HashMap::from([
             (FaultType::KafkaConnectionFailure, 0.1),
             (FaultType::KafkaReadFailure, 0.1),
+            (FaultType::KafkaInvalidMessage, 0.1),
             (FaultType::RedisConnectionFailure, 0.1),
             (FaultType::RedisReadFailure, 0.1),
             (FaultType::FileOpenFailure, 0.1),
@@ -579,6 +584,10 @@ impl IO for SimulatedIO {
         if self.should_inject_fault(&FaultType::KafkaReadFailure) {
             warn!("Injecting fault for Kafka read error");
             return Err(Errors::NoKafkaMessage);
+        }
+        if self.should_inject_fault(&FaultType::KafkaInvalidMessage) {
+            warn!("Injecting fault for invalid Kafka message");
+            return Ok(Some("dummy".to_string()));
         }
         trace!("Not injecting fault for Kafka read error");
         self.sleep(Duration::from_millis(50)).await;
@@ -784,7 +793,13 @@ async fn run_simulation_step(
 
     let kafka_message = loop {
         match io.read_kafka_message().await {
-            Ok(Some(message)) => break Ok(message),
+            Ok(Some(message)) => {
+                if message.len() <= 18 {
+                    //  found corrupted data
+                    return Err(Errors::InvalidKafkaMessage);
+                }
+                break Ok(message);
+            }
             Ok(None) => {
                 return Err(Errors::NoKafkaMessage);
             }

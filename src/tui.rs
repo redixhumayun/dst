@@ -44,6 +44,7 @@ impl FaultType {
     fn to_symbol(&self) -> &str {
         match self {
             FaultType::KafkaConnectionFailure => "⚔️",
+            FaultType::KafkaInvalidMessage => "💥",
             FaultType::RedisConnectionFailure => "🛡️",
             FaultType::KafkaReadFailure => "🔥",
             FaultType::RedisReadFailure => "⚡",
@@ -57,6 +58,7 @@ impl FaultType {
             FaultType::KafkaConnectionFailure => "Kafka connection failure injected".to_string(),
             FaultType::RedisConnectionFailure => "Redis connection failure injected".to_string(),
             FaultType::KafkaReadFailure => "Kafka read failure injected".to_string(),
+            FaultType::KafkaInvalidMessage => "Kafka invalid message injected".to_string(),
             FaultType::RedisReadFailure => "Redis read failure injected".to_string(),
             FaultType::FileOpenFailure => "File open failure injected".to_string(),
             FaultType::FileFaultType(fault) => match fault {
