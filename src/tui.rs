@@ -492,8 +492,8 @@ impl App {
             if pos == 9 {
                 let impact = match fault {
                     FaultType::KafkaConnectionFailure | FaultType::KafkaReadFailure => "💢", // Kafka attacks
-                    FaultType::RedisConnectionFailure | FaultType::RedisReadFailure => "💫", // Redis attacks
-                    FaultType::FileOpenFailure | FaultType::FileFaultType(_) => "💥", // File system attacks
+                    FaultType::RedisConnectionFailure | FaultType::RedisReadFailure => "💢", // Redis attacks
+                    FaultType::FileOpenFailure | FaultType::FileFaultType(_) => "💢", // File system attacks
                 };
                 display_chars[pos] = format!("{}{}", symbol, impact);
             }
