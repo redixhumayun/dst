@@ -17,9 +17,12 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
 use tokio::io::AsyncWriteExt;
 use tracing::{error, info, trace, warn};
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
+mod tui;
 
-enum Errors {
+pub enum Errors {
     KafkaConnectionError,
     NoKafkaMessage,
     RedisConnectionError,
@@ -62,17 +65,17 @@ impl std::fmt::Display for Errors {
 
 impl std::error::Error for Errors {}
 
-#[derive(Eq, PartialEq, Hash)]
+#[derive(Eq, PartialEq, Hash, Clone, Debug)]
 enum FaultType {
     KafkaConnectionFailure,
     KafkaReadFailure,
     RedisConnectionFailure,
     RedisReadFailure,
     FileOpenFailure,
-    FileWriteFailure,
+    FileFaultType(FileFaultType),
 }
 
-#[derive(Eq, PartialEq, Hash)]
+#[derive(Eq, PartialEq, Hash, Clone, Debug)]
 enum FileFaultType {
     FileReadFailure,
     FileWriteFailure,
@@ -83,6 +86,8 @@ enum FileFaultType {
 #[derive(Parser, Debug)]
 #[command(name = "SimulatIOn", version = "1.0", author = "Zaid Humayun")]
 struct Args {
+    #[arg(short, long)]
+    game: bool,
     #[arg(short, long)]
     simulate: bool,
 }
@@ -243,10 +248,10 @@ impl SimulatedFile {
         ]);
         Self {
             rng,
-            file_contents: Vec::new(),
+            file_contents: Vec::with_capacity(100000000),
             synced_contents: Vec::new(),
             current_file_size: 0,
-            max_file_size: 0,
+            max_file_size: 100000000,
             inner: io,
             read_position: 0,
             write_position: 0,
@@ -281,10 +286,16 @@ impl File for SimulatedFile {
             warn!("Injecting fault while writing to file");
             return Err(Errors::FileWriteError);
         }
+        trace!("Not injecting fault while writing to file");
         let data = data.as_bytes();
         let write_size = data.len();
+        trace!("making a write of size {:?}", write_size);
         if self.current_file_size + write_size > self.max_file_size {
             return Err(Errors::FileWriteError);
+        }
+        if self.file_contents.len() < self.write_position + write_size {
+            self.file_contents
+                .resize(self.write_position + write_size, 0);
         }
         self.file_contents[self.write_position..self.write_position + write_size]
             .copy_from_slice(&data[..write_size]);
@@ -330,6 +341,7 @@ trait IO {
     async fn write_to_file(&mut self, data: &str) -> Result<usize, Errors>;
     fn generate_jitter(&mut self, base_delay: Duration) -> Duration;
     async fn sleep(&mut self, duration: Duration);
+    fn get_generated_faults(&mut self) -> Vec<FaultType>;
 }
 
 struct RealIO {
@@ -443,6 +455,10 @@ impl IO for RealIO {
     async fn sleep(&mut self, duration: Duration) {
         self.clock.sleep(duration).await;
     }
+
+    fn get_generated_faults(&mut self) -> Vec<FaultType> {
+        todo!()
+    }
 }
 
 struct SimulatedIO {
@@ -454,6 +470,7 @@ struct SimulatedIO {
     redis_data: HashMap<String, String>,
     file: Option<SimulatedFile>,
     clock: Box<dyn Clock + Send>,
+    faults_generated: Vec<FaultType>,
 }
 
 impl SimulatedIO {
@@ -476,7 +493,6 @@ impl SimulatedIO {
             (FaultType::RedisConnectionFailure, 0.1),
             (FaultType::RedisReadFailure, 0.1),
             (FaultType::FileOpenFailure, 0.1),
-            (FaultType::FileWriteFailure, 0.1),
         ]);
         let kafka_failures = rng.gen_range(1..5);
 
@@ -489,12 +505,19 @@ impl SimulatedIO {
             kafka_attempts: 0,
             kafka_failures,
             clock,
+            faults_generated: Vec::new(),
         }
     }
 
     fn should_inject_fault(&mut self, fault_type: &FaultType) -> bool {
         if let Some(&probability) = self.fault_probabilities.get(fault_type) {
-            self.rng.gen_bool(probability)
+            match self.rng.gen_bool(probability) {
+                true => {
+                    self.faults_generated.push(fault_type.clone());
+                    return true;
+                }
+                false => false,
+            }
         } else {
             false
         }
@@ -560,7 +583,6 @@ impl IO for SimulatedIO {
     }
 
     async fn get_redis_config(&mut self, key: &str) -> Result<String, Errors> {
-        trace!("calling get_redis_config");
         if self.should_inject_fault(&FaultType::RedisReadFailure) {
             warn!("Injecting fault for Redis read error");
             return Err(Errors::RedisKeyRetrievalError);
@@ -593,15 +615,54 @@ impl IO for SimulatedIO {
     async fn sleep(&mut self, duration: Duration) {
         self.clock.sleep(duration).await;
     }
+
+    fn get_generated_faults(&mut self) -> Vec<FaultType> {
+        let faults = self.faults_generated.clone();
+        self.faults_generated.clear();
+        faults
+    }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    tracing_subscriber::fmt::init();
-
+fn main() {
     let args = Args::parse();
     info!("Starting application with args: {:?}", args);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
 
+    if args.game {
+        runtime.block_on(tui::run_tui());
+    } else {
+        runtime.block_on(start_simulation(args));
+    }
+}
+
+enum LogOptions {
+    Console,
+    File,
+}
+fn init_tracing(option: LogOptions) {
+    match option {
+        LogOptions::Console => {
+            tracing_subscriber::fmt::init();
+            info!("Initialising tracing to write to stdout");
+        }
+        LogOptions::File => {
+            let file_appender = RollingFileAppender::new(Rotation::DAILY, ".", "debug.log");
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(file_appender.with_max_level(tracing::Level::TRACE))
+                .with_max_level(tracing::Level::TRACE)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("setting default subscriber failed");
+            trace!("Initialising tracing to write to a file");
+        }
+    }
+}
+
+async fn start_simulation(args: Args) {
+    init_tracing(LogOptions::Console);
     if args.simulate {
         let seed = match std::env::var("SEED") {
             Ok(seed) => seed.parse::<u64>().unwrap(),
@@ -609,14 +670,16 @@ async fn main() {
         };
         info!("Running simulator with seed {}", seed);
         let mut io = SimulatedIO::new(seed);
-        start(&mut io).await;
+        init_components(&mut io).await;
+        run(&mut io).await;
     } else {
         let mut io = RealIO::new();
-        start(&mut io).await;
+        init_components(&mut io).await;
+        run(&mut io).await;
     }
 }
 
-async fn start(io: &mut dyn IO) {
+async fn init_components(io: &mut dyn IO) -> Result<Vec<FaultType>, Errors> {
     let max_retries = 5;
     let base_delay = Duration::from_millis(10);
     let mut retries = 0;
@@ -635,7 +698,7 @@ async fn start(io: &mut dyn IO) {
             }
             Err(err) => {
                 eprintln!("failed to create Kafka consumer: {:?}", err);
-                return;
+                return Err(Errors::KafkaConnectionError);
             }
         }
     }
@@ -655,13 +718,13 @@ async fn start(io: &mut dyn IO) {
             }
             Err(err) => {
                 eprintln!("failed to create Kafka consumer: {:?}", err);
-                return;
+                return Err(Errors::RedisConnectionError);
             }
         }
     }
 
     io.open_file(Path::new("output.txt")).await.unwrap();
-    run(io).await;
+    Ok(io.get_generated_faults())
 }
 
 async fn run(io: &mut dyn IO) {
@@ -669,92 +732,97 @@ async fn run(io: &mut dyn IO) {
     let mut counter = 0;
     let mut written_messages = Vec::new();
     loop {
-        counter += 1;
-        trace!("Iteration {counter}");
+        run_simulation_step(io, config_key, &mut counter, &mut written_messages)
+            .await
+            .unwrap();
+    }
+}
 
-        //  Get Kafka message
-        let max_retries = 5;
-        let base_delay = Duration::from_millis(10);
-        let mut retries = 0;
-        let mut delay = base_delay;
+async fn run_simulation_step(
+    io: &mut dyn IO,
+    config_key: &str,
+    counter: &mut usize,
+    written_messages: &mut Vec<String>,
+) -> Result<Vec<FaultType>, Errors> {
+    *counter += 1;
+    trace!("Iteration {counter}");
 
-        let kafka_message = loop {
-            match io.read_kafka_message().await {
-                Ok(Some(message)) => break Ok(message),
-                Ok(None) => {
-                    panic!("Error");
-                }
-                Err(_) if retries < max_retries => {
-                    retries += 1;
-                    let delay_with_jitter = io.generate_jitter(delay);
-                    io.sleep(delay_with_jitter).await;
-                    delay *= 2;
-                }
-                Err(err) => {
-                    error!("failed to read message from Kafka: {:?}", err);
-                    break Err(err);
-                }
-            };
+    //  Get Kafka message
+    let max_retries = 5;
+    let base_delay = Duration::from_millis(10);
+    let mut retries = 0;
+    let mut delay = base_delay;
 
-            if retries >= max_retries {
-                panic!("failed to read the message from Kafka after all retries",);
+    let kafka_message = loop {
+        match io.read_kafka_message().await {
+            Ok(Some(message)) => break Ok(message),
+            Ok(None) => {
+                return Err(Errors::NoKafkaMessage);
             }
-        }
-        .unwrap();
-
-        //  Get Redis config
-        let max_retries = 5;
-        let base_delay = Duration::from_millis(10);
-        let mut retries = 0;
-        let mut delay = base_delay;
-
-        let redis_config = loop {
-            match io.get_redis_config(&config_key).await {
-                Ok(message) => break Ok(message),
-                Err(_) if retries < max_retries => {
-                    retries += 1;
-                    let delay_with_jitter = io.generate_jitter(delay);
-                    io.sleep(delay_with_jitter).await;
-                    delay *= 2;
-                }
-                Err(err) => {
-                    error!("failed to read config from Redis: {:?}", err);
-                    break Err(err);
-                }
-            };
-
-            if retries >= max_retries {
-                panic!("failed to read the message from Kafka after all retries",);
+            Err(_) if retries < max_retries => {
+                retries += 1;
+                let delay_with_jitter = io.generate_jitter(delay);
+                io.sleep(delay_with_jitter).await;
+                delay *= 2;
             }
-        }
-        .unwrap();
-        let output = format!("Config: {}, Message: {}\n", redis_config, kafka_message);
+            Err(err) => return Err(err),
+        };
 
-        match io.write_to_file(&output).await {
-            Ok(_) => {
-                written_messages.push(output.clone());
-                if counter % 5 == 0 {
-                    match io.read_last_n_entries(5).await {
-                        Ok(read_messages) => {
-                            let expected = &written_messages[written_messages.len() - 5..];
-                            if read_messages != expected {
-                                error!(
-                                    "Data verification failed! Expected {:?}, got {:?}",
-                                    expected, read_messages
-                                );
-                                panic!("Data verification failed");
-                            }
+        if retries >= max_retries {
+            return Err(Errors::NoKafkaMessage);
+        }
+    }?;
+
+    //  Get Redis config
+    let max_retries = 5;
+    let base_delay = Duration::from_millis(10);
+    let mut retries = 0;
+    let mut delay = base_delay;
+
+    let redis_config = loop {
+        match io.get_redis_config(&config_key).await {
+            Ok(message) => break Ok(message),
+            Err(_) if retries < max_retries => {
+                retries += 1;
+                let delay_with_jitter = io.generate_jitter(delay);
+                io.sleep(delay_with_jitter).await;
+                delay *= 2;
+            }
+            Err(err) => {
+                return Err(Errors::RedisKeyRetrievalError);
+            }
+        };
+
+        if retries >= max_retries {
+            return Err(Errors::RedisKeyRetrievalError);
+        }
+    }?;
+
+    let output = format!("Config: {}, Message: {}\n", redis_config, kafka_message);
+    match io.write_to_file(&output).await {
+        Ok(_) => {
+            written_messages.push(output.clone());
+            if *counter % 5 == 0 {
+                match io.read_last_n_entries(5).await {
+                    Ok(read_messages) => {
+                        info!("the read messages {:?}", read_messages);
+                        let expected = &written_messages[written_messages.len() - 5..];
+                        info!("the expected messages {:?}", expected);
+                        if read_messages != expected {
+                            return Err(Errors::FileReadError);
                         }
-                        Err(e) => {
-                            error!("failed to read last n messages: {:?}", e);
-                            panic!("Failed to read back last n messages");
-                        }
+                        return Ok(io.get_generated_faults());
+                    }
+                    Err(e) => {
+                        return Err(Errors::FileReadError);
                     }
                 }
             }
-            Err(e) => {
-                error!("failed to write to file {:?}", e);
-            }
+            Ok(io.get_generated_faults())
+        }
+        Err(e) => {
+            error!("failed to write to file: {:?}", e);
+            return Err(Errors::FileWriteError);
         }
     }
 }
