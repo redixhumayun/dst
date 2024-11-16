@@ -241,7 +241,7 @@ impl App {
                             error!("error while initialising components for simulation {:?}", e);
                             self.death_reason = Some(format!("{:?}", e));
                             self.state = AppState::GameOver;
-                            break;
+                            std::thread::sleep(Duration::from_secs(2));
                         }
                     }
                 }
@@ -261,6 +261,7 @@ impl App {
                         error!("error while running run_simulation_step {:?}", e);
                         self.death_reason = Some(format!("{:?}", e));
                         self.state = AppState::GameOver;
+                        std::thread::sleep(Duration::from_secs(2));
                     }
                 }
                 trace!("ran single step of the simulation");
@@ -348,7 +349,7 @@ impl App {
         let area = frame.area();
 
         let game_over_art = vec![
-            r"   ▄██████▄  ▄██████▄  ████████▄     ▄████████    ▄████████    ▄████████  ▄██████▄  ",
+            r"   ▄██████▄  ▄██████▄   ████████▄     ▄████████    ▄████████    ▄████████  ▄██████▄  ",
             r"  ███    ███ ███    ███ ███   ▀███   ███    ███   ███    ███   ███    ███ ███    ███ ",
             r"  ███    █▀  ███    ███ ███    ███   ███    █▀    ███    █▀    ███    ███ ███    ███ ",
             r" ▄███        ███    ███ ███    ███  ▄███▄▄▄      ▄███▄▄▄      ▄███▄▄▄▄██▄ ███    ███ ",
@@ -436,18 +437,26 @@ impl App {
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
             .split(size);
 
-        //  Split the top section into two equal horizontal parts
-        let top_layout = Layout::default()
-            .direction(ratatui::layout::Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        //  Split the top section into one for the progress bar and one for the two windows
+        let top_split_layout = Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([Constraint::Percentage(10), Constraint::Percentage(90)])
             .split(main_layout[0]);
 
+        //  Split the bottom of the top_split into two separate sections (left & right)
+        let top_second_split_layout = Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(top_split_layout[1]);
+
+        let gauge_view = self.render_gauge_view();
         let app_view = self.render_app_view();
         let fault_view = self.render_fault_log();
         let status_view = self.render_status_log();
 
-        frame.render_widget(app_view, top_layout[0]);
-        frame.render_widget(fault_view, top_layout[1]);
+        frame.render_widget(gauge_view, top_split_layout[0]);
+        frame.render_widget(app_view, top_second_split_layout[0]);
+        frame.render_widget(fault_view, top_second_split_layout[1]);
         frame.render_widget(status_view, main_layout[1]);
         Ok(())
     }
@@ -467,8 +476,16 @@ impl App {
         for (fault, pos) in &self.active_faults {
             let symbol = fault.to_symbol().to_string();
             let pos = *pos as usize;
-            if pos < 5 {
-                display_chars[pos] = symbol;
+            if pos < 9 {
+                display_chars[pos] = symbol.clone();
+            }
+            if pos == 9 {
+                let impact = match fault {
+                    FaultType::KafkaConnectionFailure | FaultType::KafkaReadFailure => "💢", // Kafka attacks
+                    FaultType::RedisConnectionFailure | FaultType::RedisReadFailure => "💫", // Redis attacks
+                    FaultType::FileOpenFailure | FaultType::FileFaultType(_) => "💥", // File system attacks
+                };
+                display_chars[pos] = format!("{}{}", symbol, impact);
             }
         }
 
@@ -481,52 +498,84 @@ impl App {
             .block(Block::default().borders(Borders::ALL).title("Application"))
     }
 
+    fn render_gauge_view<'a>(&self) -> ratatui::widgets::Gauge {
+        let progress = (self.tick_count % 100) as u16;
+        ratatui::widgets::Gauge::default()
+            .block(Block::default().title("Iterations"))
+            .gauge_style(
+                Style::default()
+                    .fg(Color::Green)
+                    .bg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .percent(progress)
+    }
+
     fn render_fault_log<'a>(&self) -> Paragraph<'a> {
         trace!("rendering the fault log");
-        let logs = self
+        let styled_faults: Vec<Line> = self
             .fault_log
             .iter()
-            .map(|msg| msg.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
+            .flat_map(|msg| {
+                // Create two lines for each fault for bigger appearance
+                vec![
+                    Line::styled(
+                        "━━━━━━━━━━━━━━━━━━━━━".to_string(),
+                        Style::default().fg(Color::Red),
+                    ),
+                    Line::styled(
+                        format!(" ⚠️⚠️  {} ", msg), // Double warning emoji
+                        Style::default()
+                            .fg(Color::White)
+                            .bg(Color::Red)
+                            .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK),
+                    ),
+                ]
+            })
+            .collect();
 
-        Paragraph::new(logs).block(Block::default().borders(Borders::ALL).title("Fault Log"))
+        Paragraph::new(styled_faults).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red))
+                .title("⚠️ ACTIVE FAULTS ⚠️"), // Added emoji to title
+        )
     }
 
     fn render_status_log<'a>(&self) -> Paragraph<'a> {
         trace!("rendering the status log");
-
-        let total_messages = self.status_log.len();
         let styled_statuses: Vec<Line> = self
             .status_log
             .iter()
             .enumerate()
-            .map(|(idx, msg)| {
-                // Calculate color intensity based on message age
-                // Newer messages are brighter
-                // let intensity = ((idx as f64 / total_messages as f64) * 200.0) as u8;
-                let color = Color::Rgb(0, 255, 0);
-
-                Line::styled(
-                    format!(" ✅ {}", msg),
-                    Style::default().fg(Color::Green).add_modifier(
-                        if idx >= total_messages.saturating_sub(3) {
-                            // Make newest messages bold
-                            Modifier::BOLD
-                        } else {
-                            Modifier::empty()
-                        },
+            .flat_map(|(idx, msg)| {
+                // Create two lines for each status for bigger appearance
+                vec![
+                    Line::styled(
+                        "─────────────────────".to_string(),
+                        Style::default().fg(Color::Green),
                     ),
-                )
+                    Line::styled(
+                        format!(" ✅✅  {} ", msg), // Double checkmark
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD)
+                            .add_modifier(if idx >= self.status_log.len().saturating_sub(3) {
+                                Modifier::RAPID_BLINK
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ),
+                ]
             })
             .collect();
 
         Paragraph::new(styled_statuses)
-            .scroll(((self.status_log.len().saturating_sub(10)) as u16, 0)) // Auto-scroll to keep newest messages visible
+            .scroll((self.status_log.len().saturating_sub(8) as u16, 0))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Operations")
+                    .title("✅ SYSTEM STATUS ✅")
                     .border_style(Style::default().fg(Color::Green)),
             )
     }
