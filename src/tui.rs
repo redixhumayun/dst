@@ -48,7 +48,7 @@ impl FaultType {
             FaultType::KafkaReadFailure => "🔥",
             FaultType::RedisReadFailure => "⚡",
             FaultType::FileOpenFailure => "💥",
-            FaultType::FileFaultType(_) => "❄️",
+            FaultType::FileFaultType(_) => "💣",
         }
     }
 
@@ -113,6 +113,7 @@ enum AppState {
     StartScreen,
     Running,
     GameOver,
+    GameCompleted,
 }
 
 #[derive(Default)]
@@ -219,6 +220,11 @@ impl App {
                                 break;
                             }
                         }
+                        AppState::GameCompleted => {
+                            if key.code == KeyCode::Enter {
+                                break;
+                            }
+                        }
                         AppState::GameOver => {
                             if key.code == KeyCode::Enter {
                                 break;
@@ -279,6 +285,10 @@ impl App {
                     self.tick();
                     last_tick = Instant::now();
                 }
+
+                if self.tick_count == 100 {
+                    self.state = AppState::GameCompleted;
+                }
             }
 
             terminal.draw(|frame| {
@@ -294,6 +304,7 @@ impl App {
             AppState::StartScreen => self.render_start_screen(frame),
             AppState::Running => self.render_game_screen(frame, seed),
             AppState::GameOver => self.render_game_over_screen(frame),
+            AppState::GameCompleted => self.render_game_completed_screen(frame),
         };
 
         Ok(())
@@ -576,6 +587,58 @@ impl App {
         Paragraph::new(lines.join("\n"))
             .alignment(Alignment::Center)
             .block(Block::default().borders(Borders::ALL).title("Application"))
+    }
+
+    fn render_game_completed_screen(&self, frame: &mut Frame) -> io::Result<()> {
+        let area = frame.area();
+
+        let success_art = vec![
+            r" ____                              ",
+            r"/ ___| _   _  ___ ___ ___  ___ ___ ",
+            r"\___ \| | | |/ __/ __/ _ \/ __/ __|",
+            r" ___) | |_| | (_| (_|  __/\__ \__ \",
+            r"|____/ \__,_|\___\___\___||___/___/",
+        ];
+
+        let message = vec![
+            "",
+            "🎉 Congratulations! 🎉",
+            "",
+            "You have successfully passed the simulation.",
+            "",
+            "Press 'Enter' to exit",
+        ];
+
+        let all_content = [success_art, message].concat();
+
+        let styled_content = all_content
+            .iter()
+            .map(|&line| {
+                Line::styled(
+                    line.to_string(),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let paragraph = Paragraph::new(styled_content)
+            .alignment(Alignment::Center)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .title("Success")
+                    .title_alignment(Alignment::Center),
+            );
+
+        frame.render_widget(paragraph, area);
+        Ok(())
     }
 
     fn render_gauge_view<'a>(&self) -> ratatui::widgets::Gauge {

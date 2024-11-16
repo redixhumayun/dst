@@ -603,11 +603,25 @@ impl IO for SimulatedIO {
     }
 
     async fn read_file(&mut self, size: usize) -> Result<Vec<u8>, Errors> {
-        self.file.as_mut().unwrap().read(size).await
+        match self.file.as_mut().unwrap().read(size).await {
+            Ok(usize) => Ok(usize),
+            Err(e) => {
+                self.faults_generated
+                    .push(FaultType::FileFaultType(FileFaultType::FileReadFailure));
+                Err(e)
+            }
+        }
     }
 
     async fn write_to_file(&mut self, data: &str) -> Result<usize, Errors> {
-        self.file.as_mut().unwrap().write(data).await
+        match self.file.as_mut().unwrap().write(data).await {
+            Ok(usize) => Ok(usize),
+            Err(e) => {
+                self.faults_generated
+                    .push(FaultType::FileFaultType(FileFaultType::FileWriteFailure));
+                Err(e)
+            }
+        }
     }
 
     async fn read_last_n_entries(&mut self, n: usize) -> Result<Vec<String>, Errors> {
@@ -837,7 +851,7 @@ async fn run_simulation_step(
     match io.write_to_file(&output).await {
         Ok(_) => {
             written_messages.push(output.clone());
-            if *counter % 5 == 0 {
+            if *counter % 5 == 0 && written_messages.len() >= 5 {
                 match io.read_last_n_entries(5).await {
                     Ok(read_messages) => {
                         let expected = &written_messages[written_messages.len() - 5..];
