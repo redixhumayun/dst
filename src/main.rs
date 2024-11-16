@@ -548,7 +548,7 @@ impl IO for SimulatedIO {
             return Err(Errors::KafkaConnectionError);
         }
         trace!("Not injecting fault for Kafka connection error");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        self.sleep(Duration::from_millis(50)).await;
         Ok(())
     }
 
@@ -558,7 +558,7 @@ impl IO for SimulatedIO {
             return Err(Errors::RedisConnectionError);
         }
         trace!("Not injecting fault for Redis connection error");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        self.sleep(Duration::from_millis(50)).await;
         Ok(())
     }
 
@@ -581,7 +581,7 @@ impl IO for SimulatedIO {
             return Err(Errors::NoKafkaMessage);
         }
         trace!("Not injecting fault for Kafka read error");
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        self.sleep(Duration::from_millis(50)).await;
         assert!(self.kafka_messages.len() > 0);
         if let Some(message) = self.kafka_messages.choose(&mut self.rng) {
             return Ok(Some(message.clone()));
@@ -595,7 +595,7 @@ impl IO for SimulatedIO {
             return Err(Errors::RedisKeyRetrievalError);
         }
         trace!("Not injecting fault for Redis read error");
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        self.sleep(Duration::from_millis(100)).await;
         self.redis_data
             .get(key)
             .ok_or(Errors::RedisKeyRetrievalError)
