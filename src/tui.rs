@@ -503,42 +503,67 @@ impl App {
         ];
 
         // Create attack rows - 3 positions each for top and bottom
-        let mut top_attacks = vec!["   ".to_string(); 3];
-        let mut bottom_attacks = vec!["   ".to_string(); 3];
+        let mut top_attacks = vec!["   ".to_string(); 8];
+        let mut bottom_attacks = vec!["   ".to_string(); 8];
 
         // Place attacks and impacts
         for (fault, pos) in &self.active_faults {
             let symbol = fault.to_symbol().to_string();
             let pos = *pos as usize;
 
-            if pos < 3 {
-                // Top row attacks
-                top_attacks[pos] = symbol;
-            } else if pos < 6 {
-                // Bottom row attacks
-                bottom_attacks[pos - 3] = symbol;
-            } else if pos == 9 {
-                // Impact - add it to castle structure
-                let impact = "💢";
-                let options = [
-                    format!("       ║ {impact} ▲  ▲  ▲      "),
-                    format!("       ║ ▲ {impact}  ▲  ▲      "),
-                    format!("       ║ ▲  ▲ {impact}  ▲      "),
-                    format!("       ║ ▲  ▲  ▲ {impact}      "),
-                ];
-                let mut rng = rand::thread_rng();
-                let turret_wall = [1, 5];
-                let turret_wall_att = *turret_wall.choose(&mut rng).unwrap();
-                castle_structure[turret_wall_att] = options.choose(&mut rng).unwrap().clone();
-                // Example impact on top wall
+            let mut rng = rand::thread_rng();
+            let choices = [0, 1, 2];
+            let choice = *choices.choose(&mut rng).unwrap();
+
+            match choice {
+                0 => {
+                    //  top attack
+                    let choices = [0, 1, 2, 3, 4, 5, 6, 7];
+                    let choice = *choices.choose(&mut rng).unwrap();
+                    top_attacks[choice] = symbol;
+                }
+                1 => {
+                    //  bottom attack
+                    let choices = [0, 1, 2, 3, 4, 5, 6, 7];
+                    let choice = *choices.choose(&mut rng).unwrap();
+                    bottom_attacks[choice] = symbol;
+                }
+                2 => {
+                    let impact = "💢";
+                    let options = [
+                        format!(
+                            "              ║      {impact}    ▲    ▲    ▲          ║              "
+                        ),
+                        format!(
+                            "              ║      ▲    {impact}    ▲    ▲          ║              "
+                        ),
+                        format!(
+                            "              ║      ▲    ▲    {impact}    ▲          ║              "
+                        ),
+                        format!(
+                            "              ║      ▲    ▲    ▲    {impact}          ║              "
+                        ),
+                    ];
+                    let turret_wall = [1, 13];
+                    let turret_wall_att = *turret_wall.choose(&mut rng).unwrap();
+                    castle_structure[turret_wall_att] = options.choose(&mut rng).unwrap().clone();
+                }
+                _ => (),
             }
         }
 
         // Build the complete view
         // Add top attack row
         lines.push(format!(
-            "    {}  {}  {}    ",
-            top_attacks[0], top_attacks[1], top_attacks[2]
+            "              {}  {}  {}  {}  {}  {}  {}  {}              ",
+            top_attacks[0],
+            top_attacks[1],
+            top_attacks[2],
+            top_attacks[3],
+            top_attacks[4],
+            top_attacks[5],
+            top_attacks[6],
+            top_attacks[7]
         ));
 
         // Add castle structure
@@ -546,93 +571,21 @@ impl App {
 
         // Add bottom attack row
         lines.push(format!(
-            "    {}  {}  {}    ",
-            bottom_attacks[0], bottom_attacks[1], bottom_attacks[2]
+            "              {}  {}  {}  {}  {}  {}  {}  {}              ",
+            bottom_attacks[0],
+            bottom_attacks[1],
+            bottom_attacks[2],
+            bottom_attacks[3],
+            bottom_attacks[4],
+            bottom_attacks[5],
+            bottom_attacks[6],
+            bottom_attacks[7]
         ));
 
         Paragraph::new(lines.join("\n"))
             .alignment(Alignment::Center)
             .block(Block::default().borders(Borders::ALL).title("Application"))
     }
-    // fn render_app_view<'a>(&self, seed: u64) -> Paragraph<'a> {
-    //     trace!("rendering the app view");
-    //     let mut lines = vec![];
-    //     lines.push(format!("Seed: {}", seed));
-
-    //     let castle = vec![
-    //         "                           ".to_string(), //  0 (each string is 27 spaces long)
-    //         "                           ".to_string(), //  1
-    //         "       ╔═════════════╗     ".to_string(), //  2
-    //         "       ║  ▲  ▲  ▲  ▲ ║     ".to_string(), //  3
-    //         "    ╔══╣           ╠══╗    ".to_string(), //  4
-    //         "    ║  ║    🤖    ║  ║     ".to_string(), //  5
-    //         "    ╚══╣           ╠══╝    ".to_string(), //  6
-    //         "       ║  ▼  ▼  ▼  ▼ ║     ".to_string(), //  7
-    //         "       ╚═════════════╝     ".to_string(), //  8
-    //         "                           ".to_string(), //  9
-    //         "                           ".to_string(), //  10
-    //     ];
-    //     let mut castle_with_attacks = castle.clone();
-
-    //     // For attacks on top (row 1), we could use positions like:
-    //     let top_attack_positions = [
-    //         (0, 8),  // Left
-    //         (0, 15), // Center
-    //         (0, 22), // Right
-    //         (1, 8),  // Left
-    //         (1, 15), // Center
-    //         (1, 22), // Right
-    //     ];
-
-    //     // For attacks on bottom (row 9), similar positions:
-    //     let bottom_attack_positions = [
-    //         (9, 8),   // Left
-    //         (9, 15),  // Center
-    //         (9, 22),  // Right
-    //         (10, 8),  // Left
-    //         (10, 15), // Center
-    //         (10, 22), // Right
-    //     ];
-
-    //     // For impacts, we can use rows 3 and 7:
-    //     let impact_positions = [
-    //         (3, 12), // Top wall
-    //         (8, 12), // Bottom wall
-    //     ];
-
-    //     let mut frame = vec![String::new(); 11];
-
-    //     // Create a vector of characters we'll modify
-    //     let mut display_chars: Vec<String> = vec!["   ".to_string(); 20];
-
-    //     // Place robot in middle (position 10)
-    //     display_chars[10] = "🤖".to_string();
-
-    //     // Add attacks
-    //     for (fault, pos) in &self.active_faults {
-    //         let symbol = fault.to_symbol().to_string();
-    //         let pos = *pos as usize;
-    //         if pos < 9 {
-    //             display_chars[pos] = symbol.clone();
-    //         }
-    //         if pos == 9 {
-    //             let impact = match fault {
-    //                 FaultType::KafkaConnectionFailure | FaultType::KafkaReadFailure => "💢", // Kafka attacks
-    //                 FaultType::RedisConnectionFailure | FaultType::RedisReadFailure => "💢", // Redis attacks
-    //                 FaultType::FileOpenFailure | FaultType::FileFaultType(_) => "💢", // File system attacks
-    //             };
-    //             display_chars[pos] = format!("{}{}", symbol, impact);
-    //         }
-    //     }
-
-    //     // Join all characters into a single string
-    //     frame[5] = display_chars.join("");
-    //     lines.extend(frame);
-
-    //     Paragraph::new(lines.join("\n"))
-    //         .alignment(Alignment::Center)
-    //         .block(Block::default().borders(Borders::ALL).title("Application"))
-    // }
 
     fn render_gauge_view<'a>(&self) -> ratatui::widgets::Gauge {
         let progress = (self.tick_count % 100) as u16;
