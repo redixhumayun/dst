@@ -34,7 +34,7 @@ pub async fn run_tui() -> Result<()> {
     let mut io = SimulatedIO::new(seed);
     let config_key = "config_key";
     let app_result = App::default()
-        .run(&mut terminal, &mut io, &config_key)
+        .run(&mut terminal, &mut io, &config_key, seed)
         .await;
     ratatui::restore();
     Ok(app_result?)
@@ -192,6 +192,7 @@ impl App {
         terminal: &mut DefaultTerminal,
         io: &mut SimulatedIO,
         config_key: &str,
+        seed: u64,
     ) -> io::Result<()> {
         let mut last_tick = Instant::now();
         let tick_rate = Duration::from_secs(1);
@@ -273,17 +274,17 @@ impl App {
             }
 
             terminal.draw(|frame| {
-                self.draw(frame);
+                self.draw(frame, seed);
             })?;
         }
         Ok(())
     }
 
-    fn draw(&mut self, frame: &mut Frame) -> io::Result<()> {
+    fn draw(&mut self, frame: &mut Frame, seed: u64) -> io::Result<()> {
         trace!("running the draw function");
         match self.state {
             AppState::StartScreen => self.render_start_screen(frame),
-            AppState::Running => self.render_game_screen(frame),
+            AppState::Running => self.render_game_screen(frame, seed),
             AppState::GameOver => self.render_game_over_screen(frame),
         };
 
@@ -428,7 +429,7 @@ impl App {
         Ok(())
     }
 
-    fn render_game_screen(&mut self, frame: &mut Frame) -> io::Result<()> {
+    fn render_game_screen(&mut self, frame: &mut Frame, seed: u64) -> io::Result<()> {
         let size = frame.area();
 
         //  Split the screen horizontally into two main sections (top & bottom)
@@ -450,7 +451,7 @@ impl App {
             .split(top_split_layout[1]);
 
         let gauge_view = self.render_gauge_view();
-        let app_view = self.render_app_view();
+        let app_view = self.render_app_view(seed);
         let fault_view = self.render_fault_log();
         let status_view = self.render_status_log();
 
@@ -461,9 +462,10 @@ impl App {
         Ok(())
     }
 
-    fn render_app_view<'a>(&self) -> Paragraph<'a> {
+    fn render_app_view<'a>(&self, seed: u64) -> Paragraph<'a> {
         trace!("rendering the app view");
         let mut lines = vec![];
+        lines.push(format!("Seed: {}", seed));
         let mut frame = vec![String::new(); 11];
 
         // Create a vector of characters we'll modify

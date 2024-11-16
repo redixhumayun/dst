@@ -29,6 +29,7 @@ pub enum Errors {
     RedisKeyRetrievalError,
     FileOpenError,
     FileReadError,
+    ExpectedFileReadError,
     FileWriteError,
     FileSyncError,
 }
@@ -42,6 +43,7 @@ impl std::fmt::Debug for Errors {
             Errors::RedisKeyRetrievalError => write!(f, "Error retrieving redis key"),
             Errors::FileOpenError => write!(f, "Failed to open file"),
             Errors::FileReadError => write!(f, "Failed to read from file"),
+            Errors::ExpectedFileReadError => write!(f, "Expected file read error"),
             Errors::FileWriteError => write!(f, "Failed to write to file"),
             Errors::FileSyncError => write!(f, "Failed to sync file"),
         }
@@ -57,6 +59,7 @@ impl std::fmt::Display for Errors {
             Errors::RedisKeyRetrievalError => write!(f, "Error retrieving redis key"),
             Errors::FileOpenError => write!(f, "Failed to open file"),
             Errors::FileReadError => write!(f, "Failed to read from file"),
+            Errors::ExpectedFileReadError => write!(f, "Expected file read error"),
             Errors::FileWriteError => write!(f, "Failed to write to file"),
             Errors::FileSyncError => write!(f, "Failed to sync file"),
         }
@@ -811,7 +814,7 @@ async fn run_simulation_step(
                     Ok(read_messages) => {
                         let expected = &written_messages[written_messages.len() - 5..];
                         if read_messages != expected {
-                            return Err(Errors::FileReadError);
+                            return Err(Errors::ExpectedFileReadError);
                         }
                         return Ok(io.get_generated_faults());
                     }
