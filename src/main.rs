@@ -25,6 +25,7 @@ mod tui;
 pub enum Errors {
     KafkaConnectionError,
     NoKafkaMessage,
+    InvalidKafkaMessage,
     RedisConnectionError,
     RedisKeyRetrievalError,
     FileOpenError,
@@ -39,6 +40,7 @@ impl std::fmt::Debug for Errors {
         match self {
             Errors::KafkaConnectionError => write!(f, "Kafka connection error"),
             Errors::NoKafkaMessage => write!(f, "No Kafka message"),
+            Errors::InvalidKafkaMessage => write!(f, "Invalid format of Kafka message"),
             Errors::RedisConnectionError => write!(f, "Redis connection error"),
             Errors::RedisKeyRetrievalError => write!(f, "Error retrieving redis key"),
             Errors::FileOpenError => write!(f, "Failed to open file"),
@@ -55,6 +57,7 @@ impl std::fmt::Display for Errors {
         match self {
             Errors::KafkaConnectionError => write!(f, "Kafka connection error"),
             Errors::NoKafkaMessage => write!(f, "No Kafka message"),
+            Errors::InvalidKafkaMessage => write!(f, "Invalid format of Kafka message"),
             Errors::RedisConnectionError => write!(f, "Redis connection error"),
             Errors::RedisKeyRetrievalError => write!(f, "Error retrieving redis key"),
             Errors::FileOpenError => write!(f, "Failed to open file"),
@@ -578,15 +581,24 @@ impl IO for SimulatedIO {
     async fn read_kafka_message(&mut self) -> Result<Option<String>, Errors> {
         if self.should_inject_fault(&FaultType::KafkaReadFailure) {
             warn!("Injecting fault for Kafka read error");
-            return Err(Errors::NoKafkaMessage);
+            self.kafka_messages.push("dummy".to_string());
+        } else {
+            trace!("Not injecting fault for Kafka read error");
         }
-        trace!("Not injecting fault for Kafka read error");
-        self.sleep(Duration::from_millis(50)).await;
-        assert!(self.kafka_messages.len() > 0);
-        if let Some(message) = self.kafka_messages.choose(&mut self.rng) {
-            return Ok(Some(message.clone()));
+        // implements a trivial business validation on kafka messages
+        // lets us simulate a fault if the messages are not in the expected format
+        match validate_kafka_messages(&self.kafka_messages.as_slice()) {
+            Ok(_) => {
+                if let Some(message) = self.kafka_messages.choose(&mut self.rng) {
+                    return Ok(Some(message.clone()));
+                } else {
+                    return Ok(None);
+                }
+            }
+            Err(e) => {
+                return Err(e)
+            }
         }
-        return Ok(None);
     }
 
     async fn get_redis_config(&mut self, key: &str) -> Result<String, Errors> {
@@ -644,6 +656,18 @@ impl IO for SimulatedIO {
     }
 }
 
+fn validate_kafka_messages(messages: &[String]) -> Result<(), Errors> {
+    dbg!(&messages);
+    if messages.len() == 0 {
+        return Err(Errors::NoKafkaMessage);
+    } else if !messages.iter().all(|msg| msg.len() > 10) {
+        return Err(Errors::InvalidKafkaMessage);
+    }
+    Ok(())
+}
+
+// RUST_LOG=trace SEED=14717504785257241371 cargo run -- --simulate
+// This will generate a failure with invalid Kafka message format
 fn main() {
     let args = Args::parse();
     info!("Starting application with args: {:?}", args);
@@ -787,12 +811,6 @@ async fn run_simulation_step(
             Ok(Some(message)) => break Ok(message),
             Ok(None) => {
                 return Err(Errors::NoKafkaMessage);
-            }
-            Err(_) if retries < max_retries => {
-                retries += 1;
-                let delay_with_jitter = io.generate_jitter(delay);
-                io.sleep(delay_with_jitter).await;
-                delay *= 2;
             }
             Err(err) => return Err(err),
         };
