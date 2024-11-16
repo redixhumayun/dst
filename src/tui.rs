@@ -207,6 +207,9 @@ impl App {
                             KeyCode::Enter => {
                                 self.state = AppState::Running;
                             }
+                            KeyCode::Char(q) => {
+                                break;
+                            }
                             _ => (),
                         },
                         AppState::Running => {
@@ -289,23 +292,53 @@ impl App {
     fn render_start_screen(&mut self, frame: &mut Frame) -> io::Result<()> {
         let area = frame.area();
 
-        let start_message = vec![
-            "Welcome to the Fault Injection Simulator",
+        let title_art = vec![
+            r"____  _                 _       _   ___ ___",
+            r"/ ___|(_)_ __ ___  _   _| | __ _| |_|_ _/ _ \ _ __ ",
+            r"\___ \| | '_ ` _ \| | | | |/ _` | __|| | | | | '_ \ ",
+            r"___) | | | | | | | |_| | | (_| | |_ | | |_| | | | |",
+            r"|____/|_|_| |_| |_|\__,_|_|\__,_|\__|___\___/|_| |_|",
             "",
-            "Press 'Enter' to start",
-            "Press 'q' to quit",
-        ]
-        .join("\n");
+            "Fault Injection Simulator",
+        ];
 
-        let paragraph = Paragraph::new(start_message)
+        let robot_art = vec![r"    🤖    ", r"   /|\   ", r"   / \   "];
+
+        let instructions = vec![
+            "",
+            "Are you ready to test your error handling?",
+            "",
+            "🎮 Press 'Enter' to start",
+            "🚪 Press 'q' to quit",
+        ];
+
+        let all_content = [title_art, robot_art, instructions].concat();
+
+        let styled_content = all_content
+            .iter()
+            .map(|&line| {
+                Line::styled(
+                    line.to_string(),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let paragraph = Paragraph::new(styled_content)
             .alignment(Alignment::Center)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Green))
-                    .title("Fault Injection Simulator"),
-            )
-            .style(Style::default().add_modifier(Modifier::BOLD));
+                    .border_style(
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    )
+                    .title("Welcome")
+                    .title_alignment(Alignment::Center),
+            );
 
         frame.render_widget(paragraph, area);
         Ok(())
@@ -314,28 +347,81 @@ impl App {
     fn render_game_over_screen(&self, frame: &mut Frame) -> io::Result<()> {
         let area = frame.area();
 
-        let game_over_message = vec![
-            "💀 SIMULATION CRASHED 💀".into(),
-            "".into(),
-            if let Some(reason) = &self.death_reason {
-                format!("Reason: {}", reason)
-            } else {
-                "Reason: Unknown error occurred".to_string()
-            },
-            "".into(),
-            "Press 'Enter' to exit".into(),
-        ]
-        .join("\n");
+        let game_over_art = vec![
+            r"   ▄██████▄  ▄██████▄  ████████▄     ▄████████    ▄████████    ▄████████  ▄██████▄  ",
+            r"  ███    ███ ███    ███ ███   ▀███   ███    ███   ███    ███   ███    ███ ███    ███ ",
+            r"  ███    █▀  ███    ███ ███    ███   ███    █▀    ███    █▀    ███    ███ ███    ███ ",
+            r" ▄███        ███    ███ ███    ███  ▄███▄▄▄      ▄███▄▄▄      ▄███▄▄▄▄██▄ ███    ███ ",
+            r"▀▀███ ████▄  ███    ███ ███    ███ ▀▀███▀▀▀     ▀▀███▀▀▀     ▀▀███▀▀▀▀▀   ███    ███ ",
+            r"  ███    ███ ███    ███ ███    ███   ███    █▄    ███    █▄  ▀███████████ ███    ███ ",
+            r"  ███    ███ ███    ███ ███   ▄███   ███    ███   ███    ███   ███    ███ ███    ███ ",
+            r"  ████████▀   ▀██████▀  ████████▀    ██████████   ██████████   ███    ███  ▀██████▀  ",
+        ];
 
-        let paragraph = Paragraph::new(game_over_message)
+        let skull_art = vec![
+            r"     ███████████     ",
+            r"   ███████████████   ",
+            r"  █████████████████  ",
+            r" ███████████████████ ",
+            r" ███   ███████   ███ ",
+            r" ████ ██████████ ███ ",
+            r" ████ ██████████ ███ ",
+            r"  ████ ████████ ███  ",
+            r"   ██████████████    ",
+            r"    ████████████     ",
+        ];
+
+        let reason = {
+            let mut str = "".to_string();
+            if let Some(reason) = &self.death_reason {
+                str = format!("⚠️  Reason: {}", reason);
+            } else {
+                str = "⚠️  Reason: Unknown error occurred".to_string();
+            }
+            str
+        };
+        let death_message = vec![
+            "",
+            "💀 SIMULATION CRASHED 💀",
+            "",
+            reason.as_str(),
+            "",
+            "Press 'Enter' to exit",
+        ];
+
+        let all_content = [
+            game_over_art,
+            vec![""], // spacing
+            skull_art,
+            death_message,
+        ]
+        .concat();
+
+        let styled_content = all_content
+            .iter()
+            .map(|&line| {
+                let base_style = Style::default().fg(Color::Red).add_modifier(Modifier::BOLD);
+
+                // Add blinking effect to the skull and "SIMULATION CRASHED" text
+                let style = if line.contains("💀") {
+                    base_style.add_modifier(Modifier::SLOW_BLINK)
+                } else {
+                    base_style
+                };
+
+                Line::styled(line.to_string(), style)
+            })
+            .collect::<Vec<_>>();
+
+        let paragraph = Paragraph::new(styled_content)
             .alignment(Alignment::Center)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Red))
-                    .title("Game Over"),
-            )
-            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+                    .border_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))
+                    .title("Game Over")
+                    .title_alignment(Alignment::Center),
+            );
 
         frame.render_widget(paragraph, area);
         Ok(())
