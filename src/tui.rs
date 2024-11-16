@@ -197,6 +197,7 @@ impl App {
         let mut last_tick = Instant::now();
         let tick_rate = Duration::from_secs(1);
         let mut written_messages = Vec::new();
+        let mut failed_writes = Vec::new();
         let mut counter = 0;
         let mut has_initialised = false;
 
@@ -248,7 +249,14 @@ impl App {
                 }
                 info!("Done initialising the components while running game loop");
 
-                match run_simulation_step(io, config_key, &mut counter, &mut written_messages).await
+                match run_simulation_step(
+                    io,
+                    config_key,
+                    &mut counter,
+                    &mut written_messages,
+                    &mut failed_writes,
+                )
+                .await
                 {
                     Ok(faults) => {
                         info!("the generated faults {:?}", faults);

@@ -738,10 +738,17 @@ async fn run(io: &mut dyn IO) {
     let config_key = "config_key";
     let mut counter = 0;
     let mut written_messages = Vec::new();
+    let mut failed_writes = Vec::new();
     loop {
-        run_simulation_step(io, config_key, &mut counter, &mut written_messages)
-            .await
-            .unwrap();
+        run_simulation_step(
+            io,
+            config_key,
+            &mut counter,
+            &mut written_messages,
+            &mut failed_writes,
+        )
+        .await
+        .unwrap();
     }
 }
 
@@ -750,6 +757,7 @@ async fn run_simulation_step(
     config_key: &str,
     counter: &mut usize,
     written_messages: &mut Vec<String>,
+    failed_writes: &mut Vec<String>,
 ) -> Result<Vec<FaultType>, Errors> {
     *counter += 1;
     trace!("Iteration {counter}");
@@ -806,6 +814,26 @@ async fn run_simulation_step(
     }?;
 
     let output = format!("Config: {}, Message: {}\n", redis_config, kafka_message);
+
+    //  First, always attempt to write the previous failed messages
+    //  For those that succeed put them into written_messages and remove them from failed_writes
+    {
+        let mut index = 0;
+        while index < failed_writes.len() {
+            let message = &failed_writes[index].clone();
+            match io.write_to_file(&message).await {
+                Ok(_) => {
+                    failed_writes.remove(index);
+                    written_messages.push(message.clone());
+                }
+                Err(e) => {
+                    error!("failed to write message {:?}", e);
+                }
+            }
+            index += 1;
+        }
+    }
+
     match io.write_to_file(&output).await {
         Ok(_) => {
             written_messages.push(output.clone());
@@ -819,6 +847,7 @@ async fn run_simulation_step(
                         return Ok(io.get_generated_faults());
                     }
                     Err(e) => {
+                        //  TODO: Currently this won't be triggered because I'm not injecting any faults
                         return Err(Errors::FileReadError);
                     }
                 }
@@ -827,7 +856,8 @@ async fn run_simulation_step(
         }
         Err(e) => {
             error!("failed to write to file: {:?}", e);
-            return Err(Errors::FileWriteError);
+            failed_writes.push(output.clone());
+            Ok(io.get_generated_faults())
         }
     }
 }
