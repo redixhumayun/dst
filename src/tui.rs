@@ -5,7 +5,8 @@ use std::{
 };
 
 use color_eyre::Result;
-use rand::{seq::SliceRandom, RngCore};
+use rand::{seq::SliceRandom, RngCore, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use ratatui::{
     crossterm::event::{self, Event, KeyCode},
     layout::{Alignment, Constraint, Layout},
@@ -471,19 +472,11 @@ impl App {
     }
 
     fn render_app_view<'a>(&self, seed: u64) -> Paragraph<'a> {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let mut lines = vec![];
+        lines.push("Your application is under attack".to_string());
         lines.push(format!("Seed: {}", seed));
 
-        // Base castle structure - middle section that won't change
-        // let mut castle_structure = vec![
-        //     "       ╔═════════════╗     ".to_string(), // 0
-        //     "       ║  ▲  ▲  ▲  ▲       ".to_string(), // 1
-        //     "    ╔══╣           ╠══╗    ".to_string(), // 2
-        //     "    ║  ║    🤖    ║  ║     ".to_string(), // 3
-        //     "    ╚══╣           ╠══╝    ".to_string(), // 4
-        //     "       ║  ▼  ▼  ▼  ▼       ".to_string(), // 5
-        //     "       ╚═════════════╝     ".to_string(), // 6
-        // ];
         let mut castle_structure = vec![
             "              ╔══════════════════════════╗              ".to_string(), // 0
             "              ║      ▲    ▲    ▲    ▲          ║              ".to_string(), // 1
@@ -511,7 +504,6 @@ impl App {
             let symbol = fault.to_symbol().to_string();
             let pos = *pos as usize;
 
-            let mut rng = rand::thread_rng();
             let choices = [0, 1, 2];
             let choice = *choices.choose(&mut rng).unwrap();
 
