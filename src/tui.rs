@@ -25,7 +25,6 @@ pub async fn run_tui() -> Result<()> {
     color_eyre::install()?;
     init_tracing(crate::LogOptions::File);
     let mut terminal = ratatui::init();
-    let mut game_state = GameState::new();
     let seed = match std::env::var("SEED") {
         Ok(seed) => seed.parse::<u64>().unwrap(),
         Err(_) => rand::thread_rng().next_u64(),
@@ -75,44 +74,6 @@ impl FaultType {
     }
 }
 
-struct GameState {
-    active_faults: VecDeque<(FaultType, u8)>,
-    fault_log: VecDeque<String>,
-    tick_count: u64,
-}
-
-impl GameState {
-    fn new() -> Self {
-        Self {
-            active_faults: VecDeque::new(),
-            fault_log: VecDeque::new(),
-            tick_count: 0,
-        }
-    }
-
-    fn add_fault(&mut self, fault: FaultType) {
-        self.active_faults.push_back((fault.clone(), 0));
-        self.fault_log.push_back(fault.to_log_message());
-        if self.fault_log.len() > 20 {
-            self.fault_log.pop_front();
-        }
-    }
-
-    fn tick(&mut self) {
-        self.tick_count = self.tick_count.wrapping_add(1);
-        for (_, pos) in self.active_faults.iter_mut() {
-            *pos = pos.saturating_add(1);
-        }
-        while self
-            .active_faults
-            .front()
-            .map_or(false, |(_, pos)| *pos >= 10)
-        {
-            self.active_faults.pop_front();
-        }
-    }
-}
-
 #[derive(Default, PartialEq)]
 enum AppState {
     #[default]
@@ -127,6 +88,7 @@ struct App {
     state: AppState,
     active_faults: VecDeque<(FaultType, u8)>,
     fault_log: VecDeque<String>,
+    fault_log_counter: usize,
     status_log: VecDeque<String>,
     status_log_counter: usize,
     tick_count: u64,
@@ -135,6 +97,7 @@ struct App {
 
 impl App {
     fn add_fault(&mut self, fault: FaultType) {
+        self.fault_log_counter += 1;
         self.active_faults.push_back((fault.clone(), 0));
         self.fault_log.push_back(fault.to_log_message());
         if self.fault_log.len() > 20 {
@@ -598,34 +561,76 @@ impl App {
     fn render_game_completed_screen(&self, frame: &mut Frame) -> io::Result<()> {
         let area = frame.area();
 
+        let trophy_art = vec![
+            r"       🏆        ".to_string(),
+            r"    ___________    ".to_string(),
+            r"   '._==_==_=_.'   ".to_string(),
+            r"   .-\:      /-.   ".to_string(),
+            r"  | (|:.     |) |  ".to_string(),
+            r"   '-|:.     |-'   ".to_string(),
+            r"     \::.    /     ".to_string(),
+            r"      '::. .'      ".to_string(),
+            r"        ) (        ".to_string(),
+            r"      _.' '._      ".to_string(),
+            r"     '-------'     ".to_string(),
+        ];
+
         let success_art = vec![
-            r" ____                              ",
-            r"/ ___| _   _  ___ ___ ___  ___ ___ ",
-            r"\___ \| | | |/ __/ __/ _ \/ __/ __|",
-            r" ___) | |_| | (_| (_|  __/\__ \__ \",
-            r"|____/ \__,_|\___\___\___||___/___/",
+            r" ____                              ".to_string(),
+            r"/ ___| _   _  ___ ___ ___  ___ ___ ".to_string(),
+            r"\___ \| | | |/ __/ __/ _ \/ __/ __|".to_string(),
+            r" ___) | |_| | (_| (_|  __/\__ \__ \".to_string(),
+            r"|____/ \__,_|\___\___\___||___/___/".to_string(),
         ];
 
-        let message = vec![
-            "",
-            "🎉 Congratulations! 🎉",
-            "",
-            "You have successfully passed the simulation.",
-            "",
-            "Press 'Enter' to exit",
+        let stats = vec![
+            "".to_string(),
+            "🌟 SIMULATION COMPLETED SUCCESSFULLY 🌟".to_string(),
+            "".to_string(),
+            format!("🎯 Total Iterations: {}", self.tick_count).to_string(),
+            format!("⚡ Faults Handled: {}", self.fault_log_counter).to_string(),
+            format!("📝 Operations Logged: {}", self.status_log_counter).to_string(),
+            "".to_string(),
+            "You've successfully demonstrated the power of".to_string(),
+            "Deterministic Simulation Testing!".to_string(),
+            "".to_string(),
+            "🎮 Press 'Enter' to exit".to_string(),
+            "🔄 Run again with the same seed to reproduce this exact run!".to_string(),
         ];
 
-        let all_content = [success_art, message].concat();
+        let all_content = [
+            vec!["".to_string()], // Initial spacing
+            success_art,
+            vec!["".to_string()], // Spacing
+            trophy_art,
+            vec!["".to_string()], // Spacing
+            stats,
+        ]
+        .concat();
 
         let styled_content = all_content
             .iter()
-            .map(|&line| {
-                Line::styled(
-                    line.to_string(),
+            .map(|line| {
+                let style = if line.contains('🏆') || line.contains('🌟') {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD | Modifier::SLOW_BLINK)
+                } else if line.starts_with('🎯') || line.starts_with('⚡') || line.starts_with('📝')
+                {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else if line.contains("VICTORY") {
                     Style::default()
                         .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                )
+                        .add_modifier(Modifier::BOLD | Modifier::RAPID_BLINK)
+                } else {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                };
+
+                Line::styled(line.to_string(), style)
             })
             .collect::<Vec<_>>();
 
@@ -633,13 +638,13 @@ impl App {
             .alignment(Alignment::Center)
             .block(
                 Block::default()
-                    .borders(Borders::ALL)
+                    .borders(Borders::ALL) // Using double borders for more emphasis
                     .border_style(
                         Style::default()
-                            .fg(Color::Green)
+                            .fg(Color::Yellow) // Changed to yellow for celebration
                             .add_modifier(Modifier::BOLD),
                     )
-                    .title("Success")
+                    .title("🎉 Mission Accomplished! 🎉")
                     .title_alignment(Alignment::Center),
             );
 
