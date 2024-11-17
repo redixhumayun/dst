@@ -373,6 +373,7 @@ impl App {
             str
         };
         let seed_message = format!("Seed: {}", self.seed);
+        let iterations_message = format!("Iterations: {}", self.tick_count);
         let death_message = vec![
             "",
             "💀 SIMULATION CRASHED 💀",
@@ -380,6 +381,8 @@ impl App {
             reason.as_str(),
             "",
             seed_message.as_str(),
+            "",
+            iterations_message.as_str(),
             "",
             "Press 'Enter' to exit",
         ];
