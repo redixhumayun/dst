@@ -93,6 +93,7 @@ struct App {
     status_log_counter: usize,
     tick_count: u64,
     death_reason: Option<String>,
+    seed: u64,
 }
 
 impl App {
@@ -164,6 +165,7 @@ impl App {
         config_key: &str,
         seed: u64,
     ) -> io::Result<()> {
+        self.seed = seed;
         let mut last_tick = Instant::now();
         let tick_rate = Duration::from_secs(1);
         let mut written_messages = Vec::new();
@@ -370,11 +372,14 @@ impl App {
             }
             str
         };
+        let seed_message = format!("Seed: {}", self.seed);
         let death_message = vec![
             "",
             "💀 SIMULATION CRASHED 💀",
             "",
             reason.as_str(),
+            "",
+            seed_message.as_str(),
             "",
             "Press 'Enter' to exit",
         ];
