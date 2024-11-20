@@ -501,7 +501,7 @@ impl SimulatedIO {
         let fault_probabilities = HashMap::from([
             (FaultType::KafkaConnectionFailure, 0.1),
             (FaultType::KafkaReadFailure, 0.1),
-            (FaultType::KafkaInvalidMessage, 0.1),
+            (FaultType::KafkaInvalidMessage, 0.009),
             (FaultType::RedisConnectionFailure, 0.1),
             (FaultType::RedisReadFailure, 0.1),
             (FaultType::FileOpenFailure, 0.1),
@@ -856,7 +856,7 @@ async fn run_simulation_step(
                     written_messages.push(message.clone());
                 }
                 Err(e) => {
-                    error!("failed to write message {:?}", e);
+                    warn!("failed to write message {:?}", e);
                 }
             }
             index += 1;
